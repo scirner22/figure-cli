@@ -2,6 +2,11 @@ use std::fs;
 
 use clap::{App, Arg, SubCommand};
 use walkdir::WalkDir;
+use std::process::Command;
+use std::thread;
+use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -44,6 +49,46 @@ fn find_projects(file_name: &str) -> Result<Vec<String>> {
     Ok(res)
 }
 
+fn spawn_signal_handler() -> () {
+    let running_state = Arc::new(atomic::AtomicBool::new(true));
+    let shared_state = running_state.clone();
+
+    ctrlc::set_handler(move || {
+        shared_state.store(false, atomic::Ordering::SeqCst);
+    }).unwrap();
+
+    while running_state.load(atomic::Ordering::SeqCst) {
+        thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn run_command(command: &mut Command) -> Result<()> {
+    // TODO print command
+    // println!("running: ./gradlew clean {}", command);
+    let mut child = command.spawn().expect("child spawn");
+
+    thread::spawn(move || {
+        spawn_signal_handler();
+    });
+
+    loop {
+        let child_result = child.try_wait().expect("child result wait");
+
+        match child_result {
+            Some(status) => {
+                if status.success() {
+                    return Ok(());
+                } else {
+                    // TODO fix errors globally
+                    //return Err(Error::ExecError);
+                    return Err("temp error in command handler".to_owned());
+                }
+            }
+            None => thread::sleep(Duration::from_secs(5)),
+        }
+    }
+}
+
 fn project_type() -> ProjectType {
     if fs::metadata("build.gradle").is_ok() {
         ProjectType::Gradle
@@ -58,7 +103,7 @@ fn project_cmd(project: Option<&str>, cmd: &str) -> Result<()> {
     if let Some(project) = project {
         // TODO remove unwrap
         // TODO validation error when this doesn't contain
-        let temp = find_projects(project_type.to_str()).unwrap().contains(&project.to_owned());
+        let temp = find_projects(project_type.to_str()).expect("find projects failed").contains(&project.to_owned());
         if !temp {
             println!("{} was not found!", temp);
         }
@@ -66,7 +111,9 @@ fn project_cmd(project: Option<&str>, cmd: &str) -> Result<()> {
     }
 
     match project_type {
-        ProjectType::Gradle => println!("running: ./gradlew clean {}", &cmd),
+        // TODO fix gradle base command
+        ProjectType::Gradle => run_command(&mut Command::new("./gradlew")
+            .args(vec!["clean", &cmd])).expect("in run command"),
         ProjectType::Invalid => return Err("could not detect project type".to_owned()),
     }
 
