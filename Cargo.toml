@@ -7,6 +7,9 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-"clap" = "2.33"
-"ctrlc" = "3.1"
-"walkdir" = "2.3"
+clap = "2.33"
+ctrlc = "3.1"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.5"
+walkdir = "2.3"
+quick-error = "2.0"
