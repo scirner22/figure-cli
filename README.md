@@ -21,4 +21,4 @@ TODO
 
 ## Disclaimer
 
-This project is strongly opinionated and works when conventions for repositories are setup in a particular way. Sane options are provided in some cases to override this default functionality.
+~~This project is strongly opinionated and works when conventions for repositories are setup in a particular way. Sane options are provided in some cases to override this default functionality.~~ Currently experimenting with a config style approach to make this cli more widely useful.
