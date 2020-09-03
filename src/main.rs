@@ -1,30 +1,30 @@
 #[macro_use]
 extern crate quick_error;
 
+use clap::{App, Arg, SubCommand};
 use std::fs;
 use std::process::Command;
-use std::thread;
-use std::time::Duration;
-use std::sync::Arc;
-use std::sync::atomic;
-use std::collections::HashMap;
-
-use clap::{App, Arg, SubCommand};
-use serde::Deserialize;
 use walkdir::WalkDir;
 
-type Result<T> = std::result::Result<T, Error>;
+use consts::*;
+use config::{EnvironmentType, environment_type, get_config};
+
+mod config;
+mod consts;
+mod runner;
 
 // TODO
 // break up into separate files
 // read from config file for database fields
 // create config file based on other facts - make sure it's added to .gitignore
 
+pub type Result<T> = std::result::Result<T, FigError>;
+
 quick_error! {
     #[derive(Debug)]
-    pub enum Error {
-        ProjectTypeError(s: String) {}
+    pub enum FigError {
         ExecError(s: String) {}
+        ProjectTypeError(s: String) {}
         WalkDirError(e: walkdir::Error) {
             // display("{}", err)
             from()
@@ -38,46 +38,9 @@ quick_error! {
     }
 }
 
-const BUILD: &str = "build";
-const TEST: &str = "test";
-const RUN: &str = "run";
-const MIGRATE: &str = "migrate";
-const POSTGRES_CLI: &str = "psql";
-
-#[derive(Deserialize, Debug)]
-struct Config {
-    postgres_local: Option<PostgresConfig>,
-    postgres_test: Option<PostgresConfig>,
-    postgres_prod: Option<PostgresConfig>,
-}
-
-#[derive(Deserialize, Debug)]
-struct PostgresConfig {
-    host: Option<String>,
-    port: Option<u16>,
-    user: String,
-    password: String,
-    database: String,
-    schema: Option<String>,
-}
-
-fn project_cmd_about(cmd: &str) -> String {
-    format!("Central entry point to {} any \"fig aware\" project type. Supported project types (simple gradle, nested gradle).", cmd)
-}
-
 enum ProjectType {
     Gradle,
     Invalid,
-}
-
-#[derive(Deserialize, Eq, Hash, PartialEq)]
-enum EnvironmentType {
-    #[serde(rename = "local")]
-    Local,
-    #[serde(rename = "test")]
-    Test,
-    #[serde(rename = "prod")]
-    Production,
 }
 
 impl ProjectType {
@@ -108,44 +71,6 @@ fn find_projects(file_name: &str) -> Result<Vec<String>> {
     Ok(res)
 }
 
-fn spawn_signal_handler() -> () {
-    let running_state = Arc::new(atomic::AtomicBool::new(true));
-    let shared_state = running_state.clone();
-
-    ctrlc::set_handler(move || {
-        shared_state.store(false, atomic::Ordering::SeqCst);
-    }).unwrap();
-
-    while running_state.load(atomic::Ordering::SeqCst) {
-        thread::sleep(Duration::from_millis(200));
-    }
-}
-
-fn run_command(command: &mut Command) -> Result<()> {
-    // TODO print command
-    // println!("running: ./gradlew clean {}", command);
-    let mut child = command.spawn()?;
-
-    thread::spawn(move || {
-        spawn_signal_handler();
-    });
-
-    loop {
-        let child_result = child.try_wait()?;
-
-        match child_result {
-            Some(status) => {
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err(Error::ExecError("child exited unsuccessfully".to_owned()))
-                }
-            }
-            None => thread::sleep(Duration::from_secs(1)),
-        }
-    }
-}
-
 fn project_type() -> ProjectType {
     if fs::metadata("build.gradle").is_ok() {
         ProjectType::Gradle
@@ -154,14 +79,6 @@ fn project_type() -> ProjectType {
     }
 }
 
-fn environment_type(env: Option<&str>) -> EnvironmentType {
-    match env {
-        Some("local") => EnvironmentType::Local,
-        Some("test") => EnvironmentType::Test,
-        Some("prod") => EnvironmentType::Production,
-        _ => EnvironmentType::Local,
-    }
-}
 
 fn project_cmd(project: Option<&str>, cmd: &str) -> Result<()> {
     let mut cmd = cmd.to_owned();
@@ -171,10 +88,10 @@ fn project_cmd(project: Option<&str>, cmd: &str) -> Result<()> {
 
     match project_type() {
         // TODO fix gradle base command
-        ProjectType::Gradle => run_command(&mut Command::new("./gradlew")
+        ProjectType::Gradle => runner::run_command(&mut Command::new("./gradlew")
             .args(vec!["clean", &cmd])
         ),
-        ProjectType::Invalid => Err(Error::ProjectTypeError("could not detect project type".to_owned())),
+        ProjectType::Invalid => Err(FigError::ProjectTypeError("could not detect project type".to_owned())),
     }
 }
 
@@ -191,12 +108,15 @@ fn postgres_cli_cmd(env: Option<&str>) -> Result<()> {
         _ => unreachable!(),
     };
 
-    run_command(&mut cmd)
+    runner::run_command(&mut cmd)
+}
+
+fn project_cmd_about(cmd: &str) -> String {
+    format!("Central entry point to {} any \"fig aware\" project type. Supported project types (simple gradle, nested gradle).", cmd)
 }
 
 fn main() -> Result<()> {
-    let toml_string = fs::read_to_string(".fig.toml")?;
-    let config: Config = toml::from_str(&toml_string)?;
+    let config = get_config(".fig.toml")?;
     println!("{:?}", config);
 
     let project_arg = Arg::with_name("project")
