@@ -1,44 +1,45 @@
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
-use std::sync::{Arc, atomic};
+// use std::sync::{Arc, atomic};
 
 use crate::FigError;
 
-fn spawn_signal_handler() -> () {
-    let running_state = Arc::new(atomic::AtomicBool::new(true));
-    let shared_state = running_state.clone();
+pub fn run_command(command: &mut Command, parent_command: Option<&mut Command>) -> crate::Result<()> {
+    let parent = if let Some(cmd) = parent_command {
+        let proc = cmd.spawn()?;
 
-    ctrlc::set_handler(move || {
-        shared_state.store(false, atomic::Ordering::SeqCst);
-    }).unwrap();
+        // TODO instead of static delay read stdout for matching regex?
+        println!("Sleeping 10 seconds to give parent process time to startup. This needs to be fixed!");
+        thread::sleep(Duration::from_millis(10_000));
 
-    while running_state.load(atomic::Ordering::SeqCst) {
-        thread::sleep(Duration::from_millis(200));
-    }
-}
-
-pub fn run_command(command: &mut Command) -> crate::Result<()> {
-    // TODO print command
-    // println!("running: ./gradlew clean {}", command);
-    let mut child = command.spawn()?;
-
-    thread::spawn(move || {
-        spawn_signal_handler();
-    });
+        Some(proc)
+    } else {
+        None
+    };
+    let mut command_proc = command.spawn()?;
 
     loop {
-        let child_result = child.try_wait()?;
+        let child_result = command_proc.try_wait()?;
 
         match child_result {
             Some(status) => {
+                // cleanup parent
+                if let Some(mut parent_proc) = parent {
+                    let parent_result = parent_proc.try_wait()?;
+
+                    if parent_result.is_none() {
+                        parent_proc.kill()?;
+                    }
+                }
+
                 return if status.success() {
                     Ok(())
                 } else {
                     Err(FigError::ExecError("child exited unsuccessfully".to_owned()))
                 }
             }
-            _ => thread::sleep(Duration::from_secs(1))
+            _ => thread::sleep(Duration::from_millis(200))
         }
     }
 }

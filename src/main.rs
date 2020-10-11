@@ -4,29 +4,27 @@ extern crate quick_error;
 use clap::{App, Arg, SubCommand};
 use std::fs;
 use std::process::Command;
-use walkdir::WalkDir;
 
 use consts::*;
 use config::{EnvironmentType, environment_type, get_config};
+use crate::config::{Config, PostgresConfig, PostgresConfigType};
+use std::path::Path;
+use crate::FigError::ConfigError;
 
 mod config;
 mod consts;
 mod runner;
-
-// TODO
-// break up into separate files
-// read from config file for database fields
-// create config file based on other facts - make sure it's added to .gitignore
+mod util;
 
 pub type Result<T> = std::result::Result<T, FigError>;
 
 quick_error! {
     #[derive(Debug)]
     pub enum FigError {
+        ConfigError(s: String) {}
         ExecError(s: String) {}
-        ProjectTypeError(s: String) {}
-        WalkDirError(e: walkdir::Error) {
-            // display("{}", err)
+        EnvError(s: String) {}
+        GitIgnore(s: gitignore::Error) {
             from()
         }
         IoError(e: std::io::Error) {
@@ -38,94 +36,106 @@ quick_error! {
     }
 }
 
-enum ProjectType {
-    Gradle,
-    Invalid,
-}
-
-impl ProjectType {
-    fn to_str(&self) -> &str {
-        match self {
-            ProjectType::Gradle => "build.gradle",
-            ProjectType::Invalid => "",
-        }
-    }
-}
-
-fn find_projects(file_name: &str) -> Result<Vec<String>> {
-    let mut res = Vec::new();
-
-    for entry in WalkDir::new(".").max_depth(2) {
-        let path = entry?.into_path();
-        if path.ends_with(file_name) {
-            // TODO remove empty match from root
-            res.push(
-                path.parent().expect("E01 - no parent directory")
-                    .strip_prefix("./").expect("E02 - could not strip prefix")
-                    .to_str().expect("E03 - could not convert string")
-                    .trim().to_owned()
-            )
-        }
-    }
-
-    Ok(res)
-}
-
-fn project_type() -> ProjectType {
-    if fs::metadata("build.gradle").is_ok() {
-        ProjectType::Gradle
-    } else {
-        ProjectType::Invalid
-    }
-}
-
-
-fn project_cmd(project: Option<&str>, cmd: &str) -> Result<()> {
-    let mut cmd = cmd.to_owned();
-    if let Some(project) = project {
-        cmd = format!("{}:{}", project, cmd);
-    }
-
-    match project_type() {
-        // TODO fix gradle base command
-        ProjectType::Gradle => runner::run_command(&mut Command::new("./gradlew")
-            .args(vec!["clean", &cmd])
-        ),
-        ProjectType::Invalid => Err(FigError::ProjectTypeError("could not detect project type".to_owned())),
-    }
-}
-
-fn postgres_cli_cmd(env: Option<&str>) -> Result<()> {
+fn postgres_shell_cmd(postgres_config: &PostgresConfig, port: u16) -> Command {
     let mut cmd = Command::new("psql");
 
-    match environment_type(env) {
-        EnvironmentType::Local => {
-            cmd.env("PGPASSWORD", "password1");
-            cmd.env("PGOPTIONS", "--search_path=p8e");
-            cmd.args(vec!["-h", "localhost", "-U", "postgres", "p8e"]);
-        },
-        // TOOD implement other env types :) this is reachable
-        _ => unreachable!(),
+    let port = match &postgres_config._type {
+        PostgresConfigType::Kubernetes { .. } => port,
+        PostgresConfigType::GCloudProxy { .. } => port,
+        PostgresConfigType::Direct => postgres_config.port(),
     };
 
-    runner::run_command(&mut cmd)
+    cmd.env("PGPASSWORD", &postgres_config.password);
+    cmd.env("PGOPTIONS", format!("--search_path={}", &postgres_config.schema()));
+    cmd.args(
+        vec![
+            "-h", &postgres_config.host(),
+            "-U", &postgres_config.user,
+            "-p", &port.to_string(),
+            &postgres_config.database,
+        ]
+    );
+
+    return cmd
 }
 
-fn project_cmd_about(cmd: &str) -> String {
-    format!("Central entry point to {} any \"fig aware\" project type. Supported project types (simple gradle, nested gradle).", cmd)
+fn postgres_tunnel_cmd(postgres_config: &PostgresConfig, port: u16) -> Result<Option<Command>> {
+    match &postgres_config._type {
+        PostgresConfigType::Kubernetes { context, namespace, deployment } => {
+            let mut cmd = Command::new("kubectl");
+            cmd.args(
+                vec![
+                    "--context", context,
+                    "--namespace", namespace,
+                    "port-forward",
+                    &format!("deployment/{}", deployment),
+                    &format!("{}:{}", port, &postgres_config.port()),
+                ]
+            );
+
+            Ok(Some(cmd))
+        }
+        PostgresConfigType::GCloudProxy { instance } => {
+            let mut cmd = Command::new("cloud_sql_proxy");
+            cmd.args(vec!["-instances", &format!("{}=tcp:{}", instance, port)]);
+
+            Ok(Some(cmd))
+        }
+        PostgresConfigType::Direct => {
+                Ok(None)
+            }
+        }
+}
+
+fn postgres_cli_cmd(config: &Config, env: Option<&str>) -> Result<()> {
+    let port = util::find_available_port()?;
+    println!("found open port {}", port);
+
+    let config = match environment_type(env)? {
+        EnvironmentType::Local => {
+            config.postgres_local.as_ref().ok_or(FigError::ConfigError("[postgres_local] block is invalid".to_owned()))?
+        },
+        EnvironmentType::Test => {
+            config.postgres_test.as_ref().ok_or(FigError::ConfigError("[postgres_test] block is invalid".to_owned()))?
+        },
+        EnvironmentType::Production => {
+            config.postgres_prod.as_ref().ok_or(FigError::ConfigError("[postgres_prod] block is invalid".to_owned()))?
+        },
+    };
+
+    runner::run_command(
+        &mut postgres_shell_cmd(config, port),
+        postgres_tunnel_cmd(config, port)?.as_mut(),
+    )
+}
+
+fn project_cmd_about() -> String {
+    format!("Opens a postgres shell on a randomly available port.")
+}
+
+fn check_gitignore(config_path: &Path) -> Result<()> {
+    let gitignore_path = fs::canonicalize(Path::new(".gitignore"))?;
+    let config_path = fs::canonicalize(config_path)?;
+    let file = gitignore::File::new(gitignore_path.as_path())?;
+
+    if !file.is_excluded(config_path.as_path())? {
+        Err(ConfigError(".fig.toml must be excluded in your .gitignore".to_owned()))
+    } else {
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
-    let config = get_config(".fig.toml")?;
-    println!("{:?}", config);
+    // TODO on this error make sure printed messages shows you how to create a config file
+    let config_path = Path::new(".fig.toml");
+    let config = get_config(config_path)?;
 
-    let project_arg = Arg::with_name("project")
-        .short("p")
-        .long("project")
-        .value_name("PROJECT")
-        .takes_value(true)
-        .help("Name of nested project to apply SUBCOMMAND to.");
+    // check gitignore contains exclusion for fig config since it contains secrets
+    // TODO bypass this for non action commands
+    check_gitignore(config_path)?;
+
     let env_arg = Arg::with_name("environment")
+        .required(true)
         .short("e")
         .long("environment")
         .value_name("ENV")
@@ -134,40 +144,19 @@ fn main() -> Result<()> {
         .help("Environment to apply SUBCOMMAND to.");
 
     let app = App::new("fig - Figure development cli tools")
-        .version("0.1")
+        .version("0.1.0")
         .author("Stephen C. <scirner@figure.com>")
-        .subcommand(SubCommand::with_name(BUILD)
-            .arg(&project_arg)
-            .about(project_cmd_about(BUILD).as_str())
-        )
-        .subcommand(SubCommand::with_name(TEST)
-            .arg(&project_arg)
-            .about(project_cmd_about(TEST).as_str())
-        )
-        .subcommand(SubCommand::with_name(RUN)
-            .arg(&project_arg)
-            .about(project_cmd_about(RUN).as_str())
-        )
-        .subcommand(SubCommand::with_name(MIGRATE)
-            .arg(&project_arg)
-            .about(project_cmd_about(MIGRATE).as_str())
-        )
         .subcommand(SubCommand::with_name(POSTGRES_CLI)
             .arg(&env_arg)
-            .about(project_cmd_about(MIGRATE).as_str())
+            .about(project_cmd_about().as_str())
         )
         .get_matches();
 
-    let project = app.value_of("project");
-    let environment = app.value_of("environment");
-
     match app.subcommand_name() {
-        Some(BUILD) => project_cmd(project, BUILD)?,
-        Some(TEST) => project_cmd(project, TEST)?,
-        Some(RUN) => project_cmd(project, RUN)?,
-        Some(MIGRATE) => project_cmd(project, MIGRATE)?,
-
-        Some(POSTGRES_CLI) => postgres_cli_cmd(environment)?,
+        Some(POSTGRES_CLI) => postgres_cli_cmd(
+            &config,
+            app.subcommand_matches(POSTGRES_CLI).unwrap().value_of("environment"),
+        )?,
         _ => {},
     }
 

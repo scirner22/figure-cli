@@ -14,11 +14,14 @@ TODO
 
 - The goal of 1.0 is to be feature compatible with everything I currently have in bash scripts.
 
-- [ ] build, test, and run, migrate wrappers capable of detecting type of project.
-- [ ] port-forward dev DB and optionally open pgsql shell.
-- [ ] provide a way to open pgsql shell for prod DBs.
-- [ ] provide a way to open pgsql shell for local DBs.
-
-## Disclaimer
-
-~~This project is strongly opinionated and works when conventions for repositories are setup in a particular way. Sane options are provided in some cases to override this default functionality.~~ Currently experimenting with a config style approach to make this cli more widely useful.
+- [x] psql command - local env
+- [x] psql command - test env
+- [x] psql command - prod env
+- [ ] doctor command
+- [x] don't process commands unless config file is in .gitignore
+- [ ] init command - basic stub with examples.
+- [ ] release as 0.2.0
+- [ ] init command - generate the majority of the toml config file based on parsing the project.
+- [ ] exec command?
+- [ ] log command?
+- [ ] port-forward command?
