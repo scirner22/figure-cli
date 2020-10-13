@@ -3,13 +3,16 @@ extern crate quick_error;
 
 use clap::{App, Arg, SubCommand};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 
 use consts::*;
 use config::{EnvironmentType, environment_type, get_config};
 use crate::config::{Config, PostgresConfig, PostgresConfigType};
-use std::path::Path;
 use crate::FigError::ConfigError;
+use crate::runner::run_command;
 
 mod config;
 mod consts;
@@ -22,6 +25,7 @@ quick_error! {
     #[derive(Debug)]
     pub enum FigError {
         ConfigError(s: String) {}
+        DoctorError(s: String) {}
         ExecError(s: String) {}
         EnvError(s: String) {}
         GitIgnore(s: gitignore::Error) {
@@ -109,30 +113,65 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>) -> Result<()> {
     )
 }
 
-fn project_cmd_about() -> String {
-    format!("Opens a postgres shell on a randomly available port.")
-}
-
 fn check_gitignore(config_path: &Path) -> Result<()> {
     let gitignore_path = fs::canonicalize(Path::new(".gitignore"))?;
     let config_path = fs::canonicalize(config_path)?;
     let file = gitignore::File::new(gitignore_path.as_path())?;
 
     if !file.is_excluded(config_path.as_path())? {
-        Err(ConfigError(".fig.toml must be excluded in your .gitignore".to_owned()))
+        Err(ConfigError(format!("{} must be excluded in your .gitignore", FIG_CONFIG)))
     } else {
         Ok(())
     }
 }
 
-fn main() -> Result<()> {
-    // TODO on this error make sure printed messages shows you how to create a config file
-    let config_path = Path::new(".fig.toml");
-    let config = get_config(config_path)?;
+fn doctor_cmd(cmd: &str, args: Vec<&str>) -> Result<()> {
+    let mut runnable = Command::new(cmd);
+    runnable.args(args);
 
-    // check gitignore contains exclusion for fig config since it contains secrets
-    // TODO bypass this for non action commands
-    check_gitignore(config_path)?;
+    run_command(&mut runnable, None)
+        .map(|_| println!("[*] {} is installed", cmd))
+        .map_err(|e| { println!("[ ] {} is not installed", cmd); e })
+}
+
+fn init_cmd() -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(FIG_CONFIG)?;
+
+    println!("Writing config file to {}", FIG_CONFIG);
+
+    file.write_all(
+        br##"# fig-cli configuration
+
+[postgres_local]
+type = "direct"
+user = "postgres"
+password = "password1"
+database = "object_store"
+schema = "object_store"
+
+[postgres_test]
+type = { kubernetes = { context = "gke_figure-development_us-east1-b_tf-test", namespace = "p8e", deployment = "p8e-api-db-deployment" } }
+user = "p8e-api"
+password = "password1"
+database = "p8e-api"
+schema = "p8e-api"
+
+[postgres_prod]
+type = { gcloudproxy = { instance = "figure-production:us-east1:service-identity-db" } }
+user = "<insert user name>"
+password = "<insert password>"
+database = "service-identity-db"
+schema = "service_identity"
+"##)?;
+
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let config_path = Path::new(FIG_CONFIG);
 
     let env_arg = Arg::with_name("environment")
         .required(true)
@@ -146,17 +185,51 @@ fn main() -> Result<()> {
     let app = App::new("fig - Figure development cli tools")
         .version("0.1.0")
         .author("Stephen C. <scirner@figure.com>")
+        .subcommand(SubCommand::with_name(DOCTOR)
+            .about(format!("Checks if all required dependencies are installed and verifies conf file is git ignored").as_ref())
+        )
+        .subcommand(SubCommand::with_name(INIT)
+            .about(format!("Installs a {} configuration file with examples to help with setup", FIG_CONFIG).as_ref())
+        )
         .subcommand(SubCommand::with_name(POSTGRES_CLI)
             .arg(&env_arg)
-            .about(project_cmd_about().as_str())
+            .about(format!("Opens a postgres shell on a randomly available port").as_ref())
         )
         .get_matches();
 
     match app.subcommand_name() {
-        Some(POSTGRES_CLI) => postgres_cli_cmd(
-            &config,
-            app.subcommand_matches(POSTGRES_CLI).unwrap().value_of("environment"),
-        )?,
+        Some(DOCTOR) => {
+
+            let commands = vec![
+                doctor_cmd("kubectl", vec!["version"]),
+                doctor_cmd("psql", vec!["--version"]),
+                doctor_cmd("gcloud", vec!["version"]),
+                check_gitignore(config_path)
+                    .map(|_| println!("[*] {} is git ignored", FIG_CONFIG))
+                    .map_err(|e| { println!("[ ] {} is not git ignored", FIG_CONFIG); e }),
+            ];
+
+            if commands.iter().any(|res| res.is_err()) {
+                return Err(FigError::DoctorError("Please make sure all of the above checks are successful!".to_owned()))
+            }
+        },
+        Some(INIT) => {
+            init_cmd()?;
+
+            check_gitignore(config_path)
+                .map_err(|_| println!("Please add {} to your git ignore!", FIG_CONFIG));
+        },
+        Some(POSTGRES_CLI) => {
+            // TODO on this error make sure printed messages shows you how to create a config file
+            let config = get_config(config_path)?;
+
+            check_gitignore(config_path)?;
+
+            postgres_cli_cmd(
+                &config,
+                app.subcommand_matches(POSTGRES_CLI).unwrap().value_of("environment"),
+            )?
+        },
         _ => {},
     }
 

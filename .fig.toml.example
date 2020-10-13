@@ -1,1 +1,22 @@
-.fig.toml
+# fig-cli configuration
+
+[postgres_local]
+type = "direct"
+user = "postgres"
+password = "password1"
+database = "object_store"
+schema = "object_store"
+
+[postgres_test]
+type = { kubernetes = { context = "gke_figure-development_us-east1-b_tf-test", namespace = "p8e", deployment = "p8e-api-db-deployment" } }
+user = "p8e-api"
+password = "password1"
+database = "p8e-api"
+schema = "p8e-api"
+
+[postgres_prod]
+type = { gcloudproxy = { instance = "figure-production:us-east1:service-identity-db" } }
+user = "<insert user name>"
+password = "<insert password>"
+database = "service-identity-db"
+schema = "service_identity"
