@@ -21,7 +21,7 @@ fig help
 Check all required dependencies
 
 ```
-fig help
+fig doctor
 ```
 
 Install a fig config file that contains examples to help with setup
