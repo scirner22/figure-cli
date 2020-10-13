@@ -47,6 +47,7 @@ fig psql -e test
 - [x] don't process commands unless config file is in .gitignore
 - [x] init command - basic stub with examples
 - [ ] release as 0.2.0
+- [ ] subproject enabled
 - [ ] init command - generate the majority of the toml config file based on parsing the project
 - [ ] exec command?
 - [ ] log command?
