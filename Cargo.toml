@@ -1,6 +1,6 @@
 [package]
 name = "fig"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Stephen Cirner <scirner@figure.com>"]
 edition = "2018"
 

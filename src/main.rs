@@ -110,6 +110,7 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>) -> Result<()> {
     runner::run_command(
         &mut postgres_shell_cmd(config, port),
         postgres_tunnel_cmd(config, port)?.as_mut(),
+        false,
     )
 }
 
@@ -119,7 +120,7 @@ fn check_gitignore(config_path: &Path) -> Result<()> {
     let file = gitignore::File::new(gitignore_path.as_path())?;
 
     if !file.is_excluded(config_path.as_path())? {
-        Err(ConfigError(format!("{} must be excluded in your .gitignore", FIG_CONFIG)))
+        Err(ConfigError(format!("{} must be excluded in your .gitignore", config_path.to_str().unwrap())))
     } else {
         Ok(())
     }
@@ -129,7 +130,7 @@ fn doctor_cmd(cmd: &str, args: Vec<&str>) -> Result<()> {
     let mut runnable = Command::new(cmd);
     runnable.args(args);
 
-    run_command(&mut runnable, None)
+    run_command(&mut runnable, None, true)
         .map(|_| println!("[*] {} is installed", cmd))
         .map_err(|e| { println!("[ ] {} is not installed", cmd); e })
 }
@@ -138,9 +139,9 @@ fn init_cmd() -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(FIG_CONFIG)?;
+        .open(FIG_CONFIG_DEFAULT)?;
 
-    println!("Writing config file to {}", FIG_CONFIG);
+    println!("Writing config file to {}", FIG_CONFIG_DEFAULT);
 
     file.write_all(
         br##"# fig-cli configuration
@@ -171,7 +172,12 @@ schema = "service_identity"
 }
 
 fn main() -> Result<()> {
-    let config_path = Path::new(FIG_CONFIG);
+    let config_path = Path::new(FIG_CONFIG_DEFAULT);
+    let config_dir = config_path.parent().unwrap();
+
+    if !std::path::Path::new(config_dir).exists() {
+        std::fs::create_dir(config_dir)?;
+    }
 
     let env_arg = Arg::with_name("environment")
         .required(true)
@@ -183,13 +189,13 @@ fn main() -> Result<()> {
         .help("Environment to apply SUBCOMMAND to.");
 
     let app = App::new("fig - Figure development cli tools")
-        .version("0.1.0")
+        .version("0.1.1")
         .author("Stephen C. <scirner@figure.com>")
         .subcommand(SubCommand::with_name(DOCTOR)
             .about(format!("Checks if all required dependencies are installed and verifies conf file is git ignored").as_ref())
         )
         .subcommand(SubCommand::with_name(INIT)
-            .about(format!("Installs a {} configuration file with examples to help with setup", FIG_CONFIG).as_ref())
+            .about(format!("Installs a {} configuration file with examples to help with setup", FIG_CONFIG_DEFAULT).as_ref())
         )
         .subcommand(SubCommand::with_name(POSTGRES_CLI)
             .arg(&env_arg)
@@ -204,9 +210,9 @@ fn main() -> Result<()> {
                 doctor_cmd("kubectl", vec!["version"]),
                 doctor_cmd("psql", vec!["--version"]),
                 doctor_cmd("gcloud", vec!["version"]),
-                check_gitignore(config_path)
-                    .map(|_| println!("[*] {} is git ignored", FIG_CONFIG))
-                    .map_err(|e| { println!("[ ] {} is not git ignored", FIG_CONFIG); e }),
+                check_gitignore(config_dir)
+                    .map(|_| println!("[*] {} is git ignored", config_dir.to_str().unwrap()))
+                    .map_err(|e| { println!("[ ] {} is not git ignored", config_dir.to_str().unwrap()); e }),
             ];
 
             if commands.iter().any(|res| res.is_err()) {
@@ -216,14 +222,14 @@ fn main() -> Result<()> {
         Some(INIT) => {
             init_cmd()?;
 
-            check_gitignore(config_path)
-                .map_err(|_| println!("Please add {} to your git ignore!", FIG_CONFIG));
+            check_gitignore(config_dir)
+                .map_err(|_| println!("Please add {} to your git ignore!", config_dir.to_str().unwrap()));
         },
         Some(POSTGRES_CLI) => {
             // TODO on this error make sure printed messages shows you how to create a config file
             let config = get_config(config_path)?;
 
-            check_gitignore(config_path)?;
+            check_gitignore(config_dir)?;
 
             postgres_cli_cmd(
                 &config,

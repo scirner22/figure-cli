@@ -1,29 +1,39 @@
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
-// use std::sync::{Arc, atomic};
 
 use crate::FigError;
 
-pub fn run_command(command: &mut Command, parent_command: Option<&mut Command>) -> crate::Result<()> {
+pub fn run_command(
+    command: &mut Command,
+    parent_command: Option<&mut Command>,
+    suppress_std: bool,
+) -> crate::Result<()> {
     let parent = if let Some(cmd) = parent_command {
-        let proc = cmd
-            .stderr(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn()?;
+        let proc = if suppress_std {
+            cmd.stderr(Stdio::null())
+                .stdout(Stdio::null())
+        } else {
+            cmd
+        };
+        let proc = proc.spawn()?;
 
         // TODO instead of static delay read stdout for matching regex?
-        println!("Sleeping 10 seconds to give parent process time to startup. This needs to be fixed!");
-        thread::sleep(Duration::from_millis(10_000));
+        println!("Sleeping 5 seconds to give parent process time to startup. This needs to be fixed!");
+        thread::sleep(Duration::from_millis(5_000));
 
         Some(proc)
     } else {
         None
     };
-    let mut command_proc = command
-        .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .spawn()?;
+
+    let command_proc = if suppress_std {
+        command.stderr(Stdio::null())
+            .stdout(Stdio::null())
+    } else {
+       command
+    };
+    let mut command_proc = command_proc.spawn()?;
 
     loop {
         let child_result = command_proc.try_wait()?;
