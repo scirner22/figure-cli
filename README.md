@@ -43,16 +43,13 @@ fig psql -e test
 
 ## Towards 1.0
 
-### The goal of 1.0 is to be feature compatible with everything I currently have in bash scripts.
-
 - [x] psql command - local env
 - [x] psql command - test env
 - [x] psql command - prod env
 - [x] doctor command
 - [x] don't process commands unless config file is in .gitignore
 - [x] init command - basic stub with examples
-- [ ] release as 0.2.0
-- [ ] subproject enabled
+- [x] subproject enabled
 - [ ] init command - generate the majority of the toml config file based on parsing the project
 - [ ] exec command?
 - [ ] log command?
