@@ -24,7 +24,12 @@ Check all required dependencies
 fig doctor
 ```
 
-Install a fig config file that contains examples to help with setup
+Install a fig config file that contains examples to help with setup. This will create
+`.fig/default.toml`. This default configuration is perfect for repos with a single application deployment.
+The default.toml can be copied to .fig/subproject1.toml to configure an application by name. When you
+want to reference something other than default in a fig command, you must use the optional global
+parameter of `--config` or `-c`. Using multiples of this scheme with different names allows you to
+have any number of referenceable configurations.
 
 ```
 fig init

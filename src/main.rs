@@ -172,8 +172,8 @@ schema = "service_identity"
 }
 
 fn main() -> Result<()> {
-    let config_path = Path::new(FIG_CONFIG_DEFAULT);
-    let config_dir = config_path.parent().unwrap();
+    let default_config_path = Path::new(FIG_CONFIG_DEFAULT);
+    let config_dir = default_config_path.parent().unwrap();
 
     if !std::path::Path::new(config_dir).exists() {
         std::fs::create_dir(config_dir)?;
@@ -187,10 +187,19 @@ fn main() -> Result<()> {
         .takes_value(true)
         .possible_values(&["local", "test", "prod"])
         .help("Environment to apply SUBCOMMAND to.");
+    let config_arg = Arg::with_name("config")
+        .required(false)
+        .short("c")
+        .long("config")
+        .value_name("CONF")
+        .takes_value(true)
+        .default_value("default")
+        .help("Config name to read toml configuration from.");
 
     let app = App::new("fig - Figure development cli tools")
-        .version("0.1.1")
+        .version("0.2.0")
         .author("Stephen C. <scirner@figure.com>")
+        .arg(config_arg)
         .subcommand(SubCommand::with_name(DOCTOR)
             .about(format!("Checks if all required dependencies are installed and verifies conf file is git ignored").as_ref())
         )
@@ -202,6 +211,9 @@ fn main() -> Result<()> {
             .about(format!("Opens a postgres shell on a randomly available port").as_ref())
         )
         .get_matches();
+
+    let config_name = format!(".fig/{}.toml", app.value_of("config").unwrap());
+    let config_path = Path::new(config_name.as_str());
 
     match app.subcommand_name() {
         Some(DOCTOR) => {
