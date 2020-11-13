@@ -1,6 +1,6 @@
 [package]
 name = "fig"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Stephen Cirner <scirner@figure.com>"]
 edition = "2018"
 
@@ -9,7 +9,7 @@ edition = "2018"
 [dependencies]
 clap = "2.33"
 ctrlc = "3.1"
-gitignore = "1.0"
+dirs = "3.0"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.5"
 walkdir = "2.3"

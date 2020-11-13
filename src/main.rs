@@ -2,7 +2,6 @@
 extern crate quick_error;
 
 use clap::{App, Arg, SubCommand};
-use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -11,7 +10,6 @@ use std::process::Command;
 use consts::*;
 use config::{EnvironmentType, environment_type, get_config};
 use crate::config::{Config, PostgresConfig, PostgresConfigType};
-use crate::FigError::ConfigError;
 use crate::runner::run_command;
 
 mod config;
@@ -28,9 +26,6 @@ quick_error! {
         DoctorError(s: String) {}
         ExecError(s: String) {}
         EnvError(s: String) {}
-        GitIgnore(s: gitignore::Error) {
-            from()
-        }
         IoError(e: std::io::Error) {
             from()
         }
@@ -114,18 +109,6 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>) -> Result<()> {
     )
 }
 
-fn check_gitignore(config_path: &Path) -> Result<()> {
-    let gitignore_path = fs::canonicalize(Path::new(".gitignore"))?;
-    let config_path = fs::canonicalize(config_path)?;
-    let file = gitignore::File::new(gitignore_path.as_path())?;
-
-    if !file.is_excluded(config_path.as_path())? {
-        Err(ConfigError(format!("{} must be excluded in your .gitignore", config_path.to_str().unwrap())))
-    } else {
-        Ok(())
-    }
-}
-
 fn doctor_cmd(cmd: &str, args: Vec<&str>) -> Result<()> {
     let mut runnable = Command::new(cmd);
     runnable.args(args);
@@ -135,13 +118,13 @@ fn doctor_cmd(cmd: &str, args: Vec<&str>) -> Result<()> {
         .map_err(|e| { println!("[ ] {} is not installed", cmd); e })
 }
 
-fn init_cmd() -> Result<()> {
+fn init_cmd<P: AsRef<Path>>(path: P) -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(FIG_CONFIG_DEFAULT)?;
+        .open(path.as_ref())?;
 
-    println!("Writing config file to {}", FIG_CONFIG_DEFAULT);
+    println!("Writing config file to {}", path.as_ref().to_str().unwrap());
 
     file.write_all(
         br##"# fig-cli configuration
@@ -172,11 +155,15 @@ schema = "service_identity"
 }
 
 fn main() -> Result<()> {
-    let default_config_path = Path::new(FIG_CONFIG_DEFAULT);
-    let config_dir = default_config_path.parent().unwrap();
+    let mut default_config_path = dirs::config_dir().unwrap();
+    default_config_path.push(FIG_CONFIG_DIR);
+    if !std::path::Path::new(&default_config_path).exists() {
+        std::fs::create_dir(&default_config_path)?;
+    }
 
-    if !std::path::Path::new(config_dir).exists() {
-        std::fs::create_dir(config_dir)?;
+    default_config_path.push(std::env::current_dir()?.file_name().unwrap());
+    if !std::path::Path::new(&default_config_path).exists() {
+        std::fs::create_dir(&default_config_path)?;
     }
 
     let env_arg = Arg::with_name("environment")
@@ -197,14 +184,14 @@ fn main() -> Result<()> {
         .help("Config name to read toml configuration from.");
 
     let app = App::new("fig - Figure development cli tools")
-        .version("0.2.0")
+        .version("0.3.0")
         .author("Stephen C. <scirner@figure.com>")
         .arg(config_arg)
         .subcommand(SubCommand::with_name(DOCTOR)
-            .about(format!("Checks if all required dependencies are installed and verifies conf file is git ignored").as_ref())
+            .about(format!("Checks if all required dependencies are installed").as_ref())
         )
         .subcommand(SubCommand::with_name(INIT)
-            .about(format!("Installs a {} configuration file with examples to help with setup", FIG_CONFIG_DEFAULT).as_ref())
+            .about(format!("Installs a stub configuration file with examples to help with setup").as_ref())
         )
         .subcommand(SubCommand::with_name(POSTGRES_CLI)
             .arg(&env_arg)
@@ -212,8 +199,9 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
-    let config_name = format!(".fig/{}.toml", app.value_of("config").unwrap());
-    let config_path = Path::new(config_name.as_str());
+    let mut config_path = default_config_path;
+    config_path.push(app.value_of("config").unwrap());
+    config_path.set_extension("toml");
 
     match app.subcommand_name() {
         Some(DOCTOR) => {
@@ -222,9 +210,6 @@ fn main() -> Result<()> {
                 doctor_cmd("kubectl", vec!["version"]),
                 doctor_cmd("psql", vec!["--version"]),
                 doctor_cmd("gcloud", vec!["version"]),
-                check_gitignore(config_dir)
-                    .map(|_| println!("[*] {} is git ignored", config_dir.to_str().unwrap()))
-                    .map_err(|e| { println!("[ ] {} is not git ignored", config_dir.to_str().unwrap()); e }),
             ];
 
             if commands.iter().any(|res| res.is_err()) {
@@ -232,16 +217,11 @@ fn main() -> Result<()> {
             }
         },
         Some(INIT) => {
-            init_cmd()?;
-
-            check_gitignore(config_dir)
-                .map_err(|_| println!("Please add {} to your git ignore!", config_dir.to_str().unwrap()));
+            init_cmd(config_path)?;
         },
         Some(POSTGRES_CLI) => {
             // TODO on this error make sure printed messages shows you how to create a config file
             let config = get_config(config_path)?;
-
-            check_gitignore(config_dir)?;
 
             postgres_cli_cmd(
                 &config,
