@@ -15,7 +15,7 @@ cargo install --path .
 See all available commands
 
 ```
-fig help
+fig --help
 ```
 
 Check all required dependencies
@@ -40,13 +40,13 @@ fig init
 Drop into a psql shell in the test environment
 
 ```
-fig psql -e test
+fig psql test
 ```
 
 Drop into a psql shell in the test environment for the non default configuration
 
 ```
-fig psql -c provenance -e test
+fig -c provenance psql test
 ```
 
 ## Towards 1.0
@@ -54,6 +54,7 @@ fig psql -c provenance -e test
 - [x] psql command - local env
 - [x] psql command - test env
 - [x] psql command - prod env
+- [ ] psql command - non shell proxy
 - [x] doctor command
 - [x] init command - basic stub with examples
 - [x] subproject enabled

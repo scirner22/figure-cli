@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate quick_error;
 
-use clap::{App, Arg, SubCommand};
+use clap::{App, Arg, SubCommand, value_t};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -26,6 +26,7 @@ quick_error! {
         DoctorError(s: String) {}
         ExecError(s: String) {}
         EnvError(s: String) {}
+        ParseError(s: String) {}
         IoError(e: std::io::Error) {
             from()
         }
@@ -86,9 +87,15 @@ fn postgres_tunnel_cmd(postgres_config: &PostgresConfig, port: u16) -> Result<Op
         }
 }
 
-fn postgres_cli_cmd(config: &Config, env: Option<&str>) -> Result<()> {
-    let port = util::find_available_port()?;
-    println!("found open port {}", port);
+fn postgres_cli_cmd(config: &Config, env: Option<&str>, port: Option<u16>, interative_shell: bool) -> Result<()> {
+    let port = match port {
+        Some(port) => port,
+        None => {
+            let port = util::find_available_port()?;
+            println!("Found random open port {}", port);
+            port
+        },
+    };
 
     let config = match environment_type(env)? {
         EnvironmentType::Local => {
@@ -102,11 +109,20 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>) -> Result<()> {
         },
     };
 
-    runner::run_command(
-        &mut postgres_shell_cmd(config, port),
-        postgres_tunnel_cmd(config, port)?.as_mut(),
-        false,
-    )
+    if interative_shell {
+        runner::run_command(
+            &mut postgres_shell_cmd(config, port),
+            postgres_tunnel_cmd(config, port)?.as_mut(),
+            false,
+        )
+    } else {
+        // TODO implement proxy so end user can connect to local postgres without a password
+        runner::run_command(
+            &mut postgres_shell_cmd(config, port),
+            postgres_tunnel_cmd(config, port)?.as_mut(),
+            false,
+        )
+    }
 }
 
 fn doctor_cmd(cmd: &str, args: Vec<&str>) -> Result<()> {
@@ -166,8 +182,21 @@ fn main() -> Result<()> {
         std::fs::create_dir(&default_config_path)?;
     }
 
+    let static_port_arg = Arg::with_name("port")
+        .short("p")
+        .long("port")
+        .value_name("PORT")
+        .takes_value(true)
+        .help("Optional static port. If omitted, a random open port is chosen.");
+    let interactive_shell_args = Arg::with_name("shell")
+        .short("s")
+        .long("shell")
+        .value_name("SHELL")
+        .takes_value(false)
+        .help("Optionally starts a psql shell.");
     let env_arg = Arg::with_name("environment")
         .required(true)
+        .index(1)
         .short("e")
         .long("environment")
         .value_name("ENV")
@@ -184,7 +213,7 @@ fn main() -> Result<()> {
         .help("Config name to read toml configuration from.");
 
     let app = App::new("fig - Figure development cli tools")
-        .version("0.3.0")
+        .version("0.4.0")
         .author("Stephen C. <scirner@figure.com>")
         .arg(config_arg)
         .subcommand(SubCommand::with_name(DOCTOR)
@@ -195,7 +224,9 @@ fn main() -> Result<()> {
         )
         .subcommand(SubCommand::with_name(POSTGRES_CLI)
             .arg(&env_arg)
-            .about(format!("Opens a postgres shell on a randomly available port").as_ref())
+            .arg(&static_port_arg)
+            .arg(&interactive_shell_args)
+            .about(format!("Proxies a remote postgres connection").as_ref())
         )
         .get_matches();
 
@@ -205,7 +236,6 @@ fn main() -> Result<()> {
 
     match app.subcommand_name() {
         Some(DOCTOR) => {
-
             let commands = vec![
                 doctor_cmd("kubectl", vec!["version"]),
                 doctor_cmd("psql", vec!["--version"]),
@@ -222,11 +252,19 @@ fn main() -> Result<()> {
         Some(POSTGRES_CLI) => {
             // TODO on this error make sure printed messages shows you how to create a config file
             let config = get_config(config_path)?;
+            let values = app.subcommand_matches(POSTGRES_CLI).unwrap();
+            let port = match value_t!(values.value_of("port"), u16) {
+                Ok(port) => Ok(Some(port)),
+                Err(e) => match e.kind {
+                    clap::ErrorKind::ArgumentNotFound => Ok(None),
+                    clap::ErrorKind::InvalidValue => Err(FigError::ParseError("Could not parse port to u16.".to_owned())),
+                    // TDOO figure out which error conditions we need to add
+                    _ => unreachable!()
+                },
+            }?;
+            let interactive_shell = values.is_present("shell");
 
-            postgres_cli_cmd(
-                &config,
-                app.subcommand_matches(POSTGRES_CLI).unwrap().value_of("environment"),
-            )?
+            postgres_cli_cmd(&config, values.value_of("environment"), port, interactive_shell)?
         },
         _ => {},
     }
