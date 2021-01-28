@@ -1,6 +1,6 @@
 [package]
 name = "fig"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Stephen Cirner <scirner@figure.com>"]
 edition = "2018"
 
@@ -10,7 +10,9 @@ edition = "2018"
 clap = "2.33"
 ctrlc = "3.1"
 dirs = "3.0"
+prettytable-rs = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.5"
 walkdir = "2.3"
 quick-error = "2.0"
+uuid = { version = "0.8", features = ["v4"] }

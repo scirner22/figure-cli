@@ -1,16 +1,21 @@
 #[macro_use]
 extern crate quick_error;
+#[macro_use]
+extern crate prettytable;
 
 use clap::{App, Arg, SubCommand, value_t};
-use std::fs::OpenOptions;
+use std::{fs::OpenOptions, fs::File};
+use std::env::temp_dir;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use consts::*;
 use config::{EnvironmentType, environment_type, get_config};
 use crate::config::{Config, PostgresConfig, PostgresConfigType};
+use prettytable::{Table, format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR};
 use crate::runner::run_command;
+use uuid::Uuid;
 
 mod config;
 mod consts;
@@ -87,6 +92,76 @@ fn postgres_tunnel_cmd(postgres_config: &PostgresConfig, port: u16) -> Result<Op
         }
 }
 
+fn temp_file(extension: &str) -> PathBuf {
+    let mut dir = temp_dir();
+    let file_name = format!("{}.{}", Uuid::new_v4(), extension);
+
+    dir.push(file_name);
+
+    dir
+}
+
+fn postgres_pgbouncer_cmd(postgres_config: &PostgresConfig, port: u16, upstream_port: u16) -> Result<Command> {
+    let userlist_file_path_str = temp_file("txt");
+    let mut userlist_file = File::create(userlist_file_path_str.clone())?;
+    let ini_file_path_str = temp_file("ini");
+    let mut ini_file = File::create(ini_file_path_str.clone())?;
+
+    userlist_file.write_all(format!("\"{}\" \"{}\"", &postgres_config.user, &postgres_config.password).as_bytes())?;
+
+    // TODO change to md5 hash of password
+    // TODO remove
+    println!("{}", ini_file_path_str.to_str().unwrap());
+    println!("\"{}\" \"{}\"", &postgres_config.user, &postgres_config.password);
+
+    let ini_content = format!(
+        r#"################## fig-cli pgbouncer configuration ##################
+
+[databases]
+{} = host=localhost port={} user={} dbname={} password={}
+
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = {}
+unix_socket_dir =
+auth_type = any
+pool_mode = transaction
+default_pool_size = 1
+ignore_startup_parameters = extra_float_digits
+
+################## end file ##################
+"#,
+        postgres_config.database,
+        upstream_port,
+        postgres_config.user,
+        postgres_config.database,
+        postgres_config.password,
+        port,
+    );
+
+    ini_file.write_all(ini_content.as_bytes())?;
+
+    let mut cmd = Command::new("pgbouncer");
+
+    cmd.args(vec![ini_file_path_str.to_str().unwrap()]);
+
+    let mut table = Table::new();
+
+    table.set_format(*FORMAT_NO_BORDER_LINE_SEPARATOR);
+    table.set_titles(row!["KEY", "VALUE"]);
+
+    table.add_row(row![
+        "connection string",
+        format!("postgresql://localhost:{}/{}", port, postgres_config.database)]);
+    table.add_row(row!["host", "localhost"]);
+    table.add_row(row!["port", port.to_string()]);
+    table.add_row(row!["database", postgres_config.database]);
+
+    table.printstd();
+
+    Ok(cmd)
+}
+
 fn postgres_cli_cmd(config: &Config, env: Option<&str>, port: Option<u16>, interative_shell: bool) -> Result<()> {
     let port = match port {
         Some(port) => port,
@@ -116,10 +191,12 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>, port: Option<u16>, inter
             false,
         )
     } else {
-        // TODO implement proxy so end user can connect to local postgres without a password
+        let bridge_port = util::find_available_port()?;
+        println!("Using random open port for bridge {}", bridge_port);
+
         runner::run_command(
-            &mut postgres_shell_cmd(config, port),
-            postgres_tunnel_cmd(config, port)?.as_mut(),
+            &mut postgres_pgbouncer_cmd(config, port, bridge_port)?,
+            postgres_tunnel_cmd(config, bridge_port)?.as_mut(),
             false,
         )
     }
@@ -213,7 +290,7 @@ fn main() -> Result<()> {
         .help("Config name to read toml configuration from.");
 
     let app = App::new("fig - Figure development cli tools")
-        .version("0.4.0")
+        .version("0.5.0")
         .author("Stephen C. <scirner@figure.com>")
         .arg(config_arg)
         .subcommand(SubCommand::with_name(DOCTOR)
@@ -240,6 +317,7 @@ fn main() -> Result<()> {
                 doctor_cmd("kubectl", vec!["version"]),
                 doctor_cmd("psql", vec!["--version"]),
                 doctor_cmd("gcloud", vec!["version"]),
+                doctor_cmd("pgbouncer", vec!["--version"]),
             ];
 
             if commands.iter().any(|res| res.is_err()) {
