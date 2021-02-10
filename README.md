@@ -4,6 +4,8 @@ A command line tool that provides utility functions for developing at Figure.
 
 ## Installation
 
+See https://rustup.rs if you don't currently have `cargo` installed.
+
 ### crates.io
 
 ```
