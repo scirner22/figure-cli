@@ -67,16 +67,11 @@ a randomly available one.
 
 ```
 figcli psql test --port 65432
+```
 
 ## Towards 1.0
 
-- [x] psql command - local env
-- [x] psql command - test env
-- [x] psql command - prod env
-- [x] psql command - non shell proxy
-- [x] doctor command
-- [x] init command - basic stub with examples
-- [x] subproject enabled
+- [ ] psql command - seamless vault and devops.figure.com for credential management
 - [ ] init command - generate the majority of the toml config file based on parsing the project
 - [ ] exec command?
 - [ ] log command?
