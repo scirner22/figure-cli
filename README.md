@@ -4,6 +4,14 @@ A command line tool that provides utility functions for developing at Figure.
 
 ## Installation
 
+### crates.io
+
+```
+cargo install figcli
+```
+
+### Source
+
 ```
 git clone git@github.com:scirner22/figure-cli.git
 cd figure-cli
@@ -15,39 +23,39 @@ cargo install --path .
 See all available commands
 
 ```
-fig --help
+figcli --help
 ```
 
 Check all required dependencies
 
 ```
-fig doctor
+figcli doctor
 ```
 
-Install a fig config file that contains examples to help with setup. The root fig config directory is
-`$HOME/.config/fig` on linux and `$HOME/Library/Application Support/fig` on mac. The fig config for
+Install a `figcli` config file that contains examples to help with setup. The root `figcli` config directory is
+`$HOME/.config/fig` on linux and `$HOME/Library/Application Support/fig` on mac. The `figcli` config for
 the directory you are currently (ex. `~/code/app-identity`) is contained in `<OS specific config root>/fig/app-identity/`
 This default configuration is perfect for repos with a single application deployment.
 The default.toml can be copied to .fig/subproject1.toml to configure an application by name. When you
-want to reference something other than default in a fig command, you must use the optional global
+want to reference something other than default in a `figcli` command, you must use the optional global
 parameter of `--config` or `-c`. Using multiples of this scheme with different names allows you to
 have any number of referenceable configurations.
 
 ```
-fig init
+figcli init
 ```
 
 Drop into a psql shell in the test environment (default configuration file)
 
 ```
-fig psql test --shell
-fig -c default psql test --shell
+figcli psql test --shell
+figcli -c default psql test --shell
 ```
 
 Drop into a psql shell in the test environment for the non default configuration
 
 ```
-fig -c provenance psql test --shell
+figcli -c provenance psql test --shell
 ```
 
 Start a local pgbouncer and print the postgresql connection string that can be used to connect
@@ -58,7 +66,7 @@ in Vault. The `--port` flag is used so a static predefined port can be used inst
 a randomly available one.
 
 ```
-fig psql test --port 65432
+figcli psql test --port 65432
 
 ## Towards 1.0
 

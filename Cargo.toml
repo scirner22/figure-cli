@@ -1,5 +1,5 @@
 [package]
-name = "fig"
+name = "figcli"
 version = "0.5.0"
 authors = ["Stephen Cirner <scirner@figure.com>"]
 edition = "2018"
