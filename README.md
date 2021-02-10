@@ -37,24 +37,35 @@ have any number of referenceable configurations.
 fig init
 ```
 
-Drop into a psql shell in the test environment
+Drop into a psql shell in the test environment (default configuration file)
 
 ```
-fig psql test
+fig psql test --shell
+fig -c default psql test --shell
 ```
 
 Drop into a psql shell in the test environment for the non default configuration
 
 ```
-fig -c provenance psql test
+fig -c provenance psql test --shell
 ```
+
+Start a local pgbouncer and print the postgresql connection string that can be used to connect
+with a third party Postgres query application. Pgbouncer is used so that the username and password
+do not have to be used. This provides a simple way to have a third party Postgres application
+configured without having to fetch and input the ever expiring Google Cloud SQL credentials
+in Vault. The `--port` flag is used so a static predefined port can be used instead of finding
+a randomly available one.
+
+```
+fig psql test --port 65432
 
 ## Towards 1.0
 
 - [x] psql command - local env
 - [x] psql command - test env
 - [x] psql command - prod env
-- [ ] psql command - non shell proxy
+- [x] psql command - non shell proxy
 - [x] doctor command
 - [x] init command - basic stub with examples
 - [x] subproject enabled
