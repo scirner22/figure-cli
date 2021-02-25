@@ -290,7 +290,7 @@ fn main() -> Result<()> {
         .help("Config name to read toml configuration from.");
 
     let app = App::new("fig - Figure development cli tools")
-        .version("0.5.0")
+        .version("0.5.1")
         .author("Stephen C. <scirner@figure.com>")
         .arg(config_arg)
         .subcommand(SubCommand::with_name(DOCTOR)
@@ -314,7 +314,7 @@ fn main() -> Result<()> {
     match app.subcommand_name() {
         Some(DOCTOR) => {
             let commands = vec![
-                doctor_cmd("kubectl", vec!["version"]),
+                doctor_cmd("kubectl", vec![""]),
                 doctor_cmd("psql", vec!["--version"]),
                 doctor_cmd("gcloud", vec!["version"]),
                 doctor_cmd("pgbouncer", vec!["--version"]),

@@ -38,10 +38,11 @@ Install a `figcli` config file that contains examples to help with setup. The ro
 `$HOME/.config/fig` on linux and `$HOME/Library/Application Support/fig` on mac. The `figcli` config for
 the directory you are currently (ex. `~/code/app-identity`) is contained in `<OS specific config root>/fig/app-identity/`
 This default configuration is perfect for repos with a single application deployment.
-The default.toml can be copied to .fig/subproject1.toml to configure an application by name. When you
+The `default.toml` can be copied to `subproject1.toml` to configure an application by name. When you
 want to reference something other than default in a `figcli` command, you must use the optional global
-parameter of `--config` or `-c`. Using multiples of this scheme with different names allows you to
-have any number of referenceable configurations.
+parameter of `--config` or `-c` (`-c subproject1`). Using multiples of this scheme with different names allows you to
+have any number of referenceable configurations. Note: Once running this you can edit the configuration file
+and fill in the correct values.
 
 ```
 figcli init
