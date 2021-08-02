@@ -8,30 +8,30 @@ See https://rustup.rs if you don't currently have `cargo` installed.
 
 ### crates.io
 
-```
-cargo install figcli
+```bash
+$ cargo install figcli
 ```
 
 ### Source
 
-```
-git clone git@github.com:scirner22/figure-cli.git
-cd figure-cli
-cargo install --path .
+```bash 
+$ git clone git@github.com:scirner22/figure-cli.git
+$ cd figure-cli/
+$ cargo install --path .
 ```
 
 ## Usage
 
 See all available commands
 
-```
-figcli --help
+```bash
+$ figcli help  # or alternatively `figcli --help` or just `figcli`
 ```
 
 Check all required dependencies
 
-```
-figcli doctor
+```bash
+$ figcli doctor
 ```
 
 Install a `figcli` config file that contains examples to help with setup. The root `figcli` config directory is
@@ -44,21 +44,36 @@ parameter of `--config` or `-c` (`-c subproject1`). Using multiples of this sche
 have any number of referenceable configurations. Note: Once running this you can edit the configuration file
 and fill in the correct values.
 
+```bash
+$ figcli config init
 ```
-figcli init
+
+List available configurations for the current directory
+
+```bash
+$ cd src/
+$ figcli config list 
+
+provenance.toml
+default.toml
+```
+
+Edit the `provenance.toml` configuration file
+
+```bash
+$ figcli -c provenance config edit  # will use $EDITOR
 ```
 
 Drop into a psql shell in the test environment (default configuration file)
 
-```
-figcli psql test --shell
-figcli -c default psql test --shell
+```bash
+$ figcli psql test --shell
 ```
 
 Drop into a psql shell in the test environment for the non default configuration
 
-```
-figcli -c provenance psql test --shell
+```bash
+$ figcli -c provenance psql test --shell
 ```
 
 Start a local pgbouncer and print the postgresql connection string that can be used to connect
@@ -68,8 +83,8 @@ configured without having to fetch and input the ever expiring Google Cloud SQL 
 in Vault. The `--port` flag is used so a static predefined port can be used instead of finding
 a randomly available one.
 
-```
-figcli psql test --port 65432
+```bash
+$ figcli psql test --port 65432
 ```
 
 ## Towards 1.0
