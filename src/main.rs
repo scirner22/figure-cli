@@ -3,12 +3,13 @@ extern crate quick_error;
 #[macro_use]
 extern crate prettytable;
 
-use clap::{App, Arg, SubCommand, value_t};
+use clap::{App, AppSettings, Arg, SubCommand, value_t};
+use getch::Getch;
 use std::{fs::OpenOptions, fs::File};
-use std::env::temp_dir;
+use std::env::{self, temp_dir};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{self, Command};
 
 use consts::*;
 use config::{EnvironmentType, environment_type, get_config};
@@ -16,6 +17,7 @@ use crate::config::{Config, PostgresConfig, PostgresConfigType};
 use prettytable::{Table, format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR};
 use crate::runner::run_command;
 use uuid::Uuid;
+use walkdir::WalkDir;
 
 mod config;
 mod consts;
@@ -211,7 +213,23 @@ fn doctor_cmd(cmd: &str, args: Vec<&str>) -> Result<()> {
         .map_err(|e| { println!("[ ] {} is not installed", cmd); e })
 }
 
-fn init_cmd<P: AsRef<Path>>(path: P) -> Result<()> {
+fn config_init_cmd<P: AsRef<Path>>(path: P, force: bool) -> Result<()> {
+    let write_file = if force {
+        true
+    } else {
+        if path.as_ref().exists() {
+            println!("\n\"{}\" already exists.\n\nOverwrite [y/n]?", path.as_ref().to_str().unwrap());
+            let ch = Getch::new().getch().unwrap_or(0) as char;
+            ch == 'y' || ch == 'Y'
+        } else {
+            true
+        }
+    };
+
+    if !write_file {
+        return Ok(());
+    }
+
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -247,9 +265,44 @@ schema = "service_identity"
     Ok(())
 }
 
+fn config_show_path<P: AsRef<Path>>(path: P, check: bool) -> Result<()> {
+    let file_path = path.as_ref().to_str().unwrap();
+    if check {
+        let exists = path.as_ref().exists();
+        println!("Checking - {} {}", file_path, if exists { GREEN_CHECK_ICON } else { RED_X_ICON });
+    } else {
+        println!("{}", file_path);
+    }
+    Ok(())
+}
+
+fn config_edit_path<P: AsRef<Path>>(path: P) -> Result<()> {
+    let file_path = path.as_ref().to_str().unwrap();
+    // use whatever the system envvar "EDITOR" is set to:
+    let system_editor = env::var("EDITOR").unwrap_or(DEFAULT_EDITOR.to_owned());
+    let mut editor_cmd = Command::new(system_editor);
+    editor_cmd.arg(file_path);
+    runner::run_command(&mut editor_cmd, None, false)?;
+    Ok(())
+}
+
+fn config_list_files<P: AsRef<Path>>(path: P)  -> Result<()> {
+    let walker = WalkDir::new(path.as_ref());
+    for entry in walker {
+        let entry = entry.unwrap();
+        let p = entry.path();
+        if entry.path().extension().and_then(|s| s.to_str()) == Some("toml") {
+            println!("{}", p.strip_prefix(path.as_ref()).unwrap().display());
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let mut default_config_path = dirs::config_dir().unwrap();
     default_config_path.push(FIG_CONFIG_DIR);
+    let toml_file_config_base = default_config_path.clone();
+
     if !std::path::Path::new(&default_config_path).exists() {
         std::fs::create_dir(&default_config_path)?;
     }
@@ -258,6 +311,7 @@ fn main() -> Result<()> {
     if !std::path::Path::new(&default_config_path).exists() {
         std::fs::create_dir(&default_config_path)?;
     }
+    let default_config_path_copy = default_config_path.clone();
 
     let static_port_arg = Arg::with_name("port")
         .short("p")
@@ -288,31 +342,71 @@ fn main() -> Result<()> {
         .takes_value(true)
         .default_value("default")
         .help("Config name to read toml configuration from.");
+    let force_arg = Arg::with_name("force")
+        .required(false)
+        .long("force")
+        .short("f")
+        .value_name("FORCE")
+        .takes_value(false)
+        .help("Force the action without prompting for confirmation");
 
-    let app = App::new("fig - Figure development cli tools")
+    let mut app = App::new("fig - Figure development cli tools")
+        .setting(AppSettings::ArgRequiredElseHelp)
         .version("0.5.1")
         .author("Stephen C. <scirner@figure.com>")
         .arg(config_arg)
         .subcommand(SubCommand::with_name(DOCTOR)
-            .about(format!("Checks if all required dependencies are installed").as_ref())
+            .about("Checks if all required dependencies are installed")
         )
-        .subcommand(SubCommand::with_name(INIT)
-            .about(format!("Installs a stub configuration file with examples to help with setup").as_ref())
+        .subcommand(SubCommand::with_name(CONFIG)
+            .about("Configuration related operations (list environments, etc.)")
+            .subcommand(SubCommand::with_name(CHECK)
+                .about("Checks if a configuration file exists for the current directory")
+            )
+            .subcommand(SubCommand::with_name(EDIT)
+                .about("Opens the configuration file for the current directory using the system editor")
+            )
+            .subcommand(SubCommand::with_name(INIT)
+                .arg(&force_arg)
+                .about("Installs a stub configuration file with examples to help with setup")
+            )
+            .subcommand(SubCommand::with_name(SHOW)
+                .about("Prints the location of the configuration file that will be used")
+            )
+            .subcommand(SubCommand::with_name(LIST)
+                .arg(&Arg::with_name("all")
+                    .required(false)
+                    .long("all")
+                    .short("A")
+                    .value_name("ALL")
+                    .takes_value(false)
+                    .help("List all configuration files regardless of the current directory")
+                )
+                .about("List configurations available for the current directory")
+            )
         )
         .subcommand(SubCommand::with_name(POSTGRES_CLI)
             .arg(&env_arg)
             .arg(&static_port_arg)
             .arg(&interactive_shell_args)
-            .about(format!("Proxies a remote postgres connection").as_ref())
-        )
-        .get_matches();
+            .about("Proxies a remote postgres connection")
+        );
+
+    let raw_args = env::args();
+    let args = match app.get_matches_from_safe_borrow(raw_args) {
+        Ok(args) => args,
+        Err(e) => {
+           eprintln!("{}", e);
+           process::exit(1);
+        }
+    };
 
     let mut config_path = default_config_path;
-    config_path.push(app.value_of("config").unwrap());
+    config_path.push(args.value_of("config").unwrap());
     config_path.set_extension("toml");
 
-    match app.subcommand_name() {
-        Some(DOCTOR) => {
+    match args.subcommand() {
+        (DOCTOR, _) => {
             let commands = vec![
                 doctor_cmd("kubectl", vec![""]),
                 doctor_cmd("psql", vec!["--version"]),
@@ -324,13 +418,37 @@ fn main() -> Result<()> {
                 return Err(FigError::DoctorError("Please make sure all of the above checks are successful!".to_owned()))
             }
         },
-        Some(INIT) => {
-            init_cmd(config_path)?;
+        (CONFIG, Some(config)) => {
+            match config.subcommand() {
+                (CHECK, _) => {
+                    config_show_path(config_path, true)?
+                },
+                (EDIT, _) => {
+                    config_edit_path(config_path)?
+                },
+                (INIT, Some(init)) => {
+                    config_init_cmd(config_path, init.is_present("force"))?
+                },
+                (LIST, Some(list)) => {
+                    let use_base_dir = if list.is_present("all") {
+                        toml_file_config_base
+                    } else {
+                        default_config_path_copy
+                    };
+                    config_list_files(use_base_dir)?
+                },
+                (SHOW, _) => {
+                    config_show_path(config_path, false)?
+                },
+                _ => {
+                    app.print_help().unwrap();
+                }
+            }
         },
-        Some(POSTGRES_CLI) => {
+        (POSTGRES_CLI, _) => {
             // TODO on this error make sure printed messages shows you how to create a config file
             let config = get_config(config_path)?;
-            let values = app.subcommand_matches(POSTGRES_CLI).unwrap();
+            let values = args.subcommand_matches(POSTGRES_CLI).unwrap();
             let port = match value_t!(values.value_of("port"), u16) {
                 Ok(port) => Ok(Some(port)),
                 Err(e) => match e.kind {
@@ -344,7 +462,10 @@ fn main() -> Result<()> {
 
             postgres_cli_cmd(&config, values.value_of("environment"), port, interactive_shell)?
         },
-        _ => {},
+        _ => {
+            // print help by default:
+            app.print_help().unwrap();
+        }
     }
 
     Ok(())
