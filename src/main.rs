@@ -352,7 +352,7 @@ fn main() -> Result<()> {
 
     let mut app = App::new("fig - Figure development cli tools")
         .setting(AppSettings::ArgRequiredElseHelp)
-        .version("0.5.1")
+        .version("0.6.1")
         .author("Stephen C. <scirner@figure.com>")
         .arg(config_arg)
         .subcommand(SubCommand::with_name(DOCTOR)

@@ -1,6 +1,6 @@
 [package]
 name = "figcli"
-version = "0.6.0"
+version = "0.6.1"
 authors = ["Stephen Cirner <scirner@figure.com>"]
 edition = "2018"
 description = "A command line tool that provides utility functions for developing at Figure."
