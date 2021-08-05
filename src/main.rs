@@ -3,11 +3,11 @@ extern crate quick_error;
 #[macro_use]
 extern crate prettytable;
 
-use clap::{App, AppSettings, Arg, SubCommand, value_t};
+use clap::{App, Arg, SubCommand, value_t};
 use std::{env, fs};
 use std::io::Write;
 use std::path::{Path, PathBuf, StripPrefixError};
-use std::process::{self, Command};
+use std::process::Command;
 
 use consts::*;
 use config::{EnvironmentType, environment_type, get_config};
@@ -370,6 +370,7 @@ fn main() -> Result<()> {
         .help("Environment to apply SUBCOMMAND to.");
     let config_arg = Arg::with_name("config")
         .required(false)
+        .global(true)
         .short("c")
         .long("config")
         .value_name("FILE")
@@ -383,8 +384,7 @@ fn main() -> Result<()> {
         .takes_value(false)
         .help("Force the action without prompting for confirmation");
 
-    let mut app = App::new("fig - Figure development cli tools")
-        .setting(AppSettings::ArgRequiredElseHelp)
+    let app = App::new("fig - Figure development cli tools")
         .version("0.6.1")
         .author("Stephen C. <scirner@figure.com>")
         .arg(config_arg)
@@ -434,14 +434,8 @@ fn main() -> Result<()> {
             .about("Proxies a remote postgres connection")
         );
 
-    let raw_args = env::args();
-    let args = match app.get_matches_from_safe_borrow(raw_args) {
-        Ok(args) => args,
-        Err(e) => {
-           eprintln!("{}", e);
-           process::exit(1);
-        }
-    };
+    let mut app_help = app.clone();
+    let args = app.get_matches();
 
     let mut config_path = default_config_path.clone();
     config_path.push(args.value_of("config").unwrap());
@@ -485,7 +479,7 @@ fn main() -> Result<()> {
                     config_show_contents(config_path)?
                 },
                 _ => {
-                    app.print_help().unwrap();
+                    app_help.print_help().unwrap();
                 }
             }
         },
@@ -508,7 +502,7 @@ fn main() -> Result<()> {
         },
         _ => {
             // print help by default:
-            app.print_help().unwrap();
+            app_help.print_help().unwrap();
         }
     }
 
