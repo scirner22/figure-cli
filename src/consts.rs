@@ -4,6 +4,7 @@ pub const DOCTOR: &str = "doctor";
 pub const EDIT: &str = "edit";
 pub const INIT: &str = "init";
 pub const LIST: &str = "list";
+pub const PATH: &str = "path";
 pub const POSTGRES_CLI: &str = "psql";
 pub const SHOW: &str = "show";
 

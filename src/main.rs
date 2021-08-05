@@ -4,11 +4,9 @@ extern crate quick_error;
 extern crate prettytable;
 
 use clap::{App, AppSettings, Arg, SubCommand, value_t};
-use getch::Getch;
-use std::{fs::OpenOptions, fs::File};
-use std::env::{self, temp_dir};
+use std::{env, fs};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, StripPrefixError};
 use std::process::{self, Command};
 
 use consts::*;
@@ -16,7 +14,6 @@ use config::{EnvironmentType, environment_type, get_config};
 use crate::config::{Config, PostgresConfig, PostgresConfigType};
 use prettytable::{Table, format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR};
 use crate::runner::run_command;
-use uuid::Uuid;
 use walkdir::WalkDir;
 
 mod config;
@@ -37,10 +34,34 @@ quick_error! {
         IoError(e: std::io::Error) {
             from()
         }
+        StripPrefixError(e: StripPrefixError) {
+            from()
+        }
         TomlError(e: toml::de::Error) {
             from()
         }
+        WalkdirError(e: walkdir::Error) {
+            from()
+        }
     }
+}
+
+/// Recursively walks `path`, collecting any files, optionally filtering by
+/// suffix
+fn collect_files<P: AsRef<Path>>(path: P, match_suffix: Option<&str>)  -> Result<Vec<PathBuf>> {
+    let mut paths = WalkDir::new(path.as_ref())
+        .into_iter()
+        .map(|e| e.map(|p| p.path().to_path_buf()))
+        .collect::<std::result::Result<Vec<PathBuf>, walkdir::Error>>()
+        .map_err(Into::<FigError>::into)?;
+    if let Some(suffix) = match_suffix {
+        paths = paths
+            .into_iter()
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some(suffix))
+            .collect::<Vec<_>>();
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 fn postgres_shell_cmd(postgres_config: &PostgresConfig, port: u16) -> Command {
@@ -94,26 +115,17 @@ fn postgres_tunnel_cmd(postgres_config: &PostgresConfig, port: u16) -> Result<Op
         }
 }
 
-fn temp_file(extension: &str) -> PathBuf {
-    let mut dir = temp_dir();
-    let file_name = format!("{}.{}", Uuid::new_v4(), extension);
-
-    dir.push(file_name);
-
-    dir
-}
-
 fn postgres_pgbouncer_cmd(postgres_config: &PostgresConfig, port: u16, upstream_port: u16) -> Result<Command> {
-    let userlist_file_path_str = temp_file("txt");
-    let mut userlist_file = File::create(userlist_file_path_str.clone())?;
-    let ini_file_path_str = temp_file("ini");
-    let mut ini_file = File::create(ini_file_path_str.clone())?;
+    let userlist_file_path_str = util::temp_file("txt");
+    let mut userlist_file = fs::File::create(userlist_file_path_str.clone())?;
+    let ini_file_path_str = util::temp_file("ini");
+    let mut ini_file = fs::File::create(ini_file_path_str.clone())?;
 
     userlist_file.write_all(format!("\"{}\" \"{}\"", &postgres_config.user, &postgres_config.password).as_bytes())?;
 
     // TODO change to md5 hash of password
     // TODO remove
-    println!("{}", ini_file_path_str.to_str().unwrap());
+    println!("{}", ini_file_path_str.display());
     println!("\"{}\" \"{}\"", &postgres_config.user, &postgres_config.password);
 
     let ini_content = format!(
@@ -213,29 +225,47 @@ fn doctor_cmd(cmd: &str, args: Vec<&str>) -> Result<()> {
         .map_err(|e| { println!("[ ] {} is not installed", cmd); e })
 }
 
-fn config_init_cmd<P: AsRef<Path>>(path: P, force: bool) -> Result<()> {
+fn config_init_cmd<P: AsRef<Path>>(path: P, force: bool, from: Option<(P, P)>) -> Result<()> {
+
     let write_file = if force {
         true
     } else {
-        if path.as_ref().exists() {
-            println!("\n\"{}\" already exists.\n\nOverwrite [y/n]?", path.as_ref().to_str().unwrap());
-            let ch = Getch::new().getch().unwrap_or(0) as char;
-            ch == 'y' || ch == 'Y'
-        } else {
-            true
-        }
+        util::prompt_on_write(&path)
     };
 
     if !write_file {
         return Ok(());
     }
 
-    let mut file = OpenOptions::new()
+    // If a path is supplied, copy from the path (which must be listed in `config list -A`)
+    // - `config_file_base_path` is base location of configuration files
+    // - `app_config_path` the path, as it appears in `config list -A`, e.g.
+    //   "figure-cli/provenance.toml"
+    if let Some((app_config_path, config_file_base_path)) = from {
+
+        let target_config_file: Option<(PathBuf, PathBuf)> = collect_files(&config_file_base_path, Some("toml"))?
+            .into_iter()
+            .flat_map(|p| p.strip_prefix(config_file_base_path.as_ref()).map(|p_prefix| (p.clone(), p_prefix.to_path_buf())))
+            .find(|(_, prefix_path)| prefix_path == app_config_path.as_ref());
+
+        return match target_config_file {
+            Some((app_config_full_path, _)) => {
+                let result = fs::copy(app_config_full_path, &path)
+                    .map(|_| ())
+                    .map_err(Into::into);
+                println!("Writing config file to {}", path.as_ref().display());
+                result
+            }
+            None => Err(FigError::ConfigError(format!("Can't copy configuration {}", app_config_path.as_ref().display())))
+        }
+    }
+
+    let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path.as_ref())?;
 
-    println!("Writing config file to {}", path.as_ref().to_str().unwrap());
+    println!("Writing config file to {}", path.as_ref().display());
 
     file.write_all(
         br##"# fig-cli configuration
@@ -265,13 +295,19 @@ schema = "service_identity"
     Ok(())
 }
 
+fn config_show_contents<P: AsRef<Path>>(path: P) -> Result<()> {
+    let contents = fs::read_to_string(path.as_ref())?;
+    println!("{}", contents);
+    Ok(())
+}
+
 fn config_show_path<P: AsRef<Path>>(path: P, check: bool) -> Result<()> {
-    let file_path = path.as_ref().to_str().unwrap();
+    let path = path.as_ref();
     if check {
-        let exists = path.as_ref().exists();
-        println!("Checking - {} {}", file_path, if exists { GREEN_CHECK_ICON } else { RED_X_ICON });
+        let exists = path.exists();
+        println!("Checking - {} {}", path.display(), if exists { GREEN_CHECK_ICON } else { RED_X_ICON });
     } else {
-        println!("{}", file_path);
+        println!("{}", path.display());
     }
     Ok(())
 }
@@ -287,31 +323,30 @@ fn config_edit_path<P: AsRef<Path>>(path: P) -> Result<()> {
 }
 
 fn config_list_files<P: AsRef<Path>>(path: P)  -> Result<()> {
-    let walker = WalkDir::new(path.as_ref());
-    for entry in walker {
-        let entry = entry.unwrap();
-        let p = entry.path();
-        if entry.path().extension().and_then(|s| s.to_str()) == Some("toml") {
-            println!("{}", p.strip_prefix(path.as_ref()).unwrap().display());
-        }
+    for p in collect_files(&path, Some("toml"))? {
+        println!("{}", p.strip_prefix(&path)?.display());
     }
     Ok(())
 }
 
 fn main() -> Result<()> {
-    let mut default_config_path = dirs::config_dir().unwrap();
-    default_config_path.push(FIG_CONFIG_DIR);
-    let toml_file_config_base = default_config_path.clone();
 
-    if !std::path::Path::new(&default_config_path).exists() {
-        std::fs::create_dir(&default_config_path)?;
-    }
+    let (default_config_path, base_config_path) = {
+        let mut default_config_path = dirs::config_dir().unwrap();
+        default_config_path.push(FIG_CONFIG_DIR);
+        let base_config_path = default_config_path.clone();
 
-    default_config_path.push(std::env::current_dir()?.file_name().unwrap());
-    if !std::path::Path::new(&default_config_path).exists() {
-        std::fs::create_dir(&default_config_path)?;
-    }
-    let default_config_path_copy = default_config_path.clone();
+        if !std::path::Path::new(&default_config_path).exists() {
+            std::fs::create_dir(&default_config_path)?;
+        }
+
+        default_config_path.push(std::env::current_dir()?.file_name().unwrap());
+        if !std::path::Path::new(&default_config_path).exists() {
+            std::fs::create_dir(&default_config_path)?;
+        }
+
+        (default_config_path, base_config_path)
+    };
 
     let static_port_arg = Arg::with_name("port")
         .short("p")
@@ -322,7 +357,6 @@ fn main() -> Result<()> {
     let interactive_shell_args = Arg::with_name("shell")
         .short("s")
         .long("shell")
-        .value_name("SHELL")
         .takes_value(false)
         .help("Optionally starts a psql shell.");
     let env_arg = Arg::with_name("environment")
@@ -338,7 +372,7 @@ fn main() -> Result<()> {
         .required(false)
         .short("c")
         .long("config")
-        .value_name("CONF")
+        .value_name("FILE")
         .takes_value(true)
         .default_value("default")
         .help("Config name to read toml configuration from.");
@@ -346,7 +380,6 @@ fn main() -> Result<()> {
         .required(false)
         .long("force")
         .short("f")
-        .value_name("FORCE")
         .takes_value(false)
         .help("Force the action without prompting for confirmation");
 
@@ -368,17 +401,26 @@ fn main() -> Result<()> {
             )
             .subcommand(SubCommand::with_name(INIT)
                 .arg(&force_arg)
+                .arg(&Arg::with_name("from")
+                    .required(false)
+                    .long("from")
+                    .value_name("FILE")
+                    .takes_value(true)
+                    .help("Copy an existing configuration file")
+                )
                 .about("Installs a stub configuration file with examples to help with setup")
             )
-            .subcommand(SubCommand::with_name(SHOW)
+            .subcommand(SubCommand::with_name(PATH)
                 .about("Prints the location of the configuration file that will be used")
+            )
+            .subcommand(SubCommand::with_name(SHOW)
+                .about("Prints the contents of the configuration file that will be used")
             )
             .subcommand(SubCommand::with_name(LIST)
                 .arg(&Arg::with_name("all")
                     .required(false)
                     .long("all")
                     .short("A")
-                    .value_name("ALL")
                     .takes_value(false)
                     .help("List all configuration files regardless of the current directory")
                 )
@@ -401,7 +443,7 @@ fn main() -> Result<()> {
         }
     };
 
-    let mut config_path = default_config_path;
+    let mut config_path = default_config_path.clone();
     config_path.push(args.value_of("config").unwrap());
     config_path.set_extension("toml");
 
@@ -427,18 +469,20 @@ fn main() -> Result<()> {
                     config_edit_path(config_path)?
                 },
                 (INIT, Some(init)) => {
-                    config_init_cmd(config_path, init.is_present("force"))?
+                    config_init_cmd(config_path, init.is_present("force"), init.value_of("from").map(|p| (PathBuf::from(p), base_config_path)))?
                 },
                 (LIST, Some(list)) => {
-                    let use_base_dir = if list.is_present("all") {
-                        toml_file_config_base
+                    config_list_files(if list.is_present("all") {
+                        &base_config_path
                     } else {
-                        default_config_path_copy
-                    };
-                    config_list_files(use_base_dir)?
+                        &default_config_path
+                    })?
+                },
+                (PATH, _) => {
+                    config_show_path(config_path, false)?
                 },
                 (SHOW, _) => {
-                    config_show_path(config_path, false)?
+                    config_show_contents(config_path)?
                 },
                 _ => {
                     app.print_help().unwrap();
