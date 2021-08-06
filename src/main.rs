@@ -237,12 +237,13 @@ fn config_init_cmd<P: AsRef<Path>>(path: P, force: bool, from: Option<(P, P)>) -
         return Ok(());
     }
 
-    // If a path is supplied, copy from the path (which must be listed in `config list -A`)
+    // If a path is supplied, copy an existing configuration file to create a
+    // new configuration.
     // - `config_file_base_path` is base location of configuration files
     // - `app_config_path` the path, as it appears in `config list -A`, e.g.
     //   "figure-cli/provenance.toml"
+    // - `path` is the destination path of the configuration file to be written
     if let Some((app_config_path, config_file_base_path)) = from {
-
         let target_config_file: Option<(PathBuf, PathBuf)> = collect_files(&config_file_base_path, Some("toml"))?
             .into_iter()
             .flat_map(|p| p.strip_prefix(config_file_base_path.as_ref()).map(|p_prefix| (p.clone(), p_prefix.to_path_buf())))
