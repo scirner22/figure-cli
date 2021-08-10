@@ -14,6 +14,8 @@ pub struct Config {
     // exec_test: Option<ExecConfig>,
     // exec_prod: Option<ExecConfig>,
 
+    pub port_forward: Option<PortForwardConfig>,
+
     pub postgres_local: Option<PostgresConfig>,
     pub postgres_test: Option<PostgresConfig>,
     pub postgres_prod: Option<PostgresConfig>,
@@ -51,6 +53,18 @@ impl PostgresConfig {
     pub fn schema(&self) -> String {
         self.schema.clone().unwrap_or("public".to_owned())
     }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum PortForwardConfigType {
+    Kubernetes { context: String, namespace: String }
+}
+
+#[derive(Deserialize, Debug)]
+pub struct PortForwardConfig {
+    #[serde(rename = "type")]
+    pub _type: PortForwardConfigType,
 }
 
 // #[derive(Deserialize, Debug)]

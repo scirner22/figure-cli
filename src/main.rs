@@ -8,10 +8,12 @@ use std::{env, fs};
 use std::io::Write;
 use std::path::{Path, PathBuf, StripPrefixError};
 use std::process::Command;
+use std::os::unix::fs::OpenOptionsExt;
 
 use consts::*;
 use config::{EnvironmentType, environment_type, get_config};
-use crate::config::{Config, PostgresConfig, PostgresConfigType};
+use crate::config::{Config, PostgresConfig, PostgresConfigType, PortForwardConfig, PortForwardConfigType};
+use crate::util::ForwardingInfo;
 use prettytable::{Table, format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR};
 use crate::runner::run_command;
 use walkdir::WalkDir;
@@ -64,31 +66,73 @@ fn collect_files<P: AsRef<Path>>(path: P, match_suffix: Option<&str>)  -> Result
     Ok(paths)
 }
 
-fn postgres_shell_cmd(postgres_config: &PostgresConfig, port: u16) -> Command {
-    let mut cmd = Command::new("psql");
-
-    let port = match &postgres_config._type {
-        PostgresConfigType::Kubernetes { .. } => port,
-        PostgresConfigType::GCloudProxy { .. } => port,
-        PostgresConfigType::Direct => postgres_config.port(),
+fn k8s_port_forward(config: Option<&PortForwardConfig>, forwarding: &ForwardingInfo, context: Option<&str>, namespace: Option<&str>) -> Result<()> {
+    let (config_context, config_namespace) = if let Some(config) = config {
+        match config._type {
+            PortForwardConfigType::Kubernetes { ref context, ref namespace } =>
+                (Some(context.as_str()), Some(namespace.as_str())),
+        }
+    } else {
+        (None, None)
     };
 
-    cmd.env("PGPASSWORD", &postgres_config.password);
-    cmd.env("PGOPTIONS", format!("--search_path={}", &postgres_config.schema()));
+    // override the values from the config if `context` and `namespace` are explicitly provided:
+    let context_arg = context.or(config_context)
+        .map_or_else(|| "".to_owned(), |c| format!("--context={}", c));
+    let namespace_arg = namespace.or(config_namespace)
+        .map_or_else(|| "".to_owned(), |n| format!("--namespace={}", n));
+    let pod_name = format!("figcli-temp-port-forward-{}", util::random_alphanum(8));
+
+    let source_contents = format!(include_str!("../template/kubectl-port-forward-remote-host.sh.template"),
+                                  temp_pod_name=pod_name,
+                                  context_arg=context_arg,
+                                  namespace_arg=namespace_arg,
+                                  local_port=forwarding.local_port,
+                                  remote_host=forwarding.remote_host,
+                                  remote_port=forwarding.remote_port);
+
+    // Write the parameterized template out as a shell script to execute:
+    let shell_script_name = util::temp_file("sh");
+    let mut shell_script_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .open(&shell_script_name)?;
+
+    shell_script_file.write_all(source_contents.as_bytes())?;
+
+    let mut port_forward_script = Command::new(shell_script_name.to_str().unwrap());
+
+    println!("Forwarding {}:{} -> {}", forwarding.remote_host, forwarding.remote_port, forwarding.local_port);
+
+    runner::run_command(&mut port_forward_script, None, false)
+}
+
+fn postgres_shell_cmd(config: &PostgresConfig, port: u16) -> Command {
+    let mut cmd = Command::new("psql");
+
+    let port = match &config._type {
+        PostgresConfigType::Kubernetes { .. } => port,
+        PostgresConfigType::GCloudProxy { .. } => port,
+        PostgresConfigType::Direct => config.port(),
+    };
+
+    cmd.env("PGPASSWORD", &config.password);
+    cmd.env("PGOPTIONS", format!("--search_path={}", &config.schema()));
     cmd.args(
         vec![
-            "-h", &postgres_config.host(),
-            "-U", &postgres_config.user,
+            "-h", &config.host(),
+            "-U", &config.user,
             "-p", &port.to_string(),
-            &postgres_config.database,
+            &config.database,
         ]
     );
 
     return cmd
 }
 
-fn postgres_tunnel_cmd(postgres_config: &PostgresConfig, port: u16) -> Result<Option<Command>> {
-    match &postgres_config._type {
+fn postgres_tunnel_cmd(config: &PostgresConfig, port: u16) -> Result<Option<Command>> {
+    match &config._type {
         PostgresConfigType::Kubernetes { context, namespace, deployment } => {
             let mut cmd = Command::new("kubectl");
             cmd.args(
@@ -97,7 +141,7 @@ fn postgres_tunnel_cmd(postgres_config: &PostgresConfig, port: u16) -> Result<Op
                     "--namespace", namespace,
                     "port-forward",
                     &format!("deployment/{}", deployment),
-                    &format!("{}:{}", port, &postgres_config.port()),
+                    &format!("{}:{}", port, &config.port()),
                 ]
             );
 
@@ -115,42 +159,25 @@ fn postgres_tunnel_cmd(postgres_config: &PostgresConfig, port: u16) -> Result<Op
         }
 }
 
-fn postgres_pgbouncer_cmd(postgres_config: &PostgresConfig, port: u16, upstream_port: u16) -> Result<Command> {
+fn postgres_pgbouncer_cmd(config: &PostgresConfig, port: u16, upstream_port: u16) -> Result<Command> {
     let userlist_file_path_str = util::temp_file("txt");
-    let mut userlist_file = fs::File::create(userlist_file_path_str.clone())?;
+    let mut userlist_file = fs::File::create(&userlist_file_path_str)?;
     let ini_file_path_str = util::temp_file("ini");
-    let mut ini_file = fs::File::create(ini_file_path_str.clone())?;
+    let mut ini_file = fs::File::create(&ini_file_path_str)?;
 
-    userlist_file.write_all(format!("\"{}\" \"{}\"", &postgres_config.user, &postgres_config.password).as_bytes())?;
+    userlist_file.write_all(format!("\"{}\" \"{}\"", &config.user, &config.password).as_bytes())?;
 
     // TODO change to md5 hash of password
     // TODO remove
     println!("{}", ini_file_path_str.display());
-    println!("\"{}\" \"{}\"", &postgres_config.user, &postgres_config.password);
+    println!("\"{}\" \"{}\"", &config.user, &config.password);
 
-    let ini_content = format!(
-        r#"################## fig-cli pgbouncer configuration ##################
-
-[databases]
-{} = host=localhost port={} user={} dbname={} password={}
-
-[pgbouncer]
-listen_addr = 0.0.0.0
-listen_port = {}
-unix_socket_dir =
-auth_type = any
-pool_mode = transaction
-default_pool_size = 1
-ignore_startup_parameters = extra_float_digits
-
-################## end file ##################
-"#,
-        postgres_config.database,
-        upstream_port,
-        postgres_config.user,
-        postgres_config.database,
-        postgres_config.password,
-        port,
+    let ini_content = format!(include_str!("../template/pgbouncer.toml.template"),
+        database=config.database,
+        upstream_port=upstream_port,
+        user=config.user,
+        password=config.password,
+        listen_port=port
     );
 
     ini_file.write_all(ini_content.as_bytes())?;
@@ -166,10 +193,10 @@ ignore_startup_parameters = extra_float_digits
 
     table.add_row(row![
         "connection string",
-        format!("postgresql://localhost:{}/{}", port, postgres_config.database)]);
+        format!("postgresql://localhost:{}/{}", port, config.database)]);
     table.add_row(row!["host", "localhost"]);
     table.add_row(row!["port", port.to_string()]);
-    table.add_row(row!["database", postgres_config.database]);
+    table.add_row(row!["database", config.database]);
 
     table.printstd();
 
@@ -186,7 +213,7 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>, port: Option<u16>, inter
         },
     };
 
-    let config = match environment_type(env)? {
+    let postgres_config = match environment_type(env)? {
         EnvironmentType::Local => {
             config.postgres_local.as_ref().ok_or(FigError::ConfigError("[postgres_local] block is invalid".to_owned()))?
         },
@@ -200,8 +227,8 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>, port: Option<u16>, inter
 
     if interative_shell {
         runner::run_command(
-            &mut postgres_shell_cmd(config, port),
-            postgres_tunnel_cmd(config, port)?.as_mut(),
+            &mut postgres_shell_cmd(postgres_config, port),
+            postgres_tunnel_cmd(postgres_config, port)?.as_mut(),
             false,
         )
     } else {
@@ -209,8 +236,8 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>, port: Option<u16>, inter
         println!("Using random open port for bridge {}", bridge_port);
 
         runner::run_command(
-            &mut postgres_pgbouncer_cmd(config, port, bridge_port)?,
-            postgres_tunnel_cmd(config, bridge_port)?.as_mut(),
+            &mut postgres_pgbouncer_cmd(postgres_config, port, bridge_port)?,
+            postgres_tunnel_cmd(postgres_config, bridge_port)?.as_mut(),
             false,
         )
     }
@@ -267,31 +294,7 @@ fn config_init_cmd<P: AsRef<Path>>(path: P, force: bool, from: Option<(P, P)>) -
         .open(path.as_ref())?;
 
     println!("Writing config file to {}", path.as_ref().display());
-
-    file.write_all(
-        br##"# fig-cli configuration
-
-[postgres_local]
-type = "direct"
-user = "postgres"
-password = "password1"
-database = "object_store"
-schema = "object_store"
-
-[postgres_test]
-type = { kubernetes = { context = "gke_figure-development_us-east1-b_tf-test", namespace = "p8e", deployment = "p8e-api-db-deployment" } }
-user = "p8e-api"
-password = "password1"
-database = "p8e-api"
-schema = "p8e-api"
-
-[postgres_prod]
-type = { gcloudproxy = { instance = "figure-production:us-east1:service-identity-db" } }
-user = "<insert user name>"
-password = "<insert password>"
-database = "service-identity-db"
-schema = "service_identity"
-"##)?;
+    file.write_all(include_bytes!("../template/config.toml.example"))?;
 
     Ok(())
 }
@@ -385,9 +388,9 @@ fn main() -> Result<()> {
         .takes_value(false)
         .help("Force the action without prompting for confirmation");
 
-    let app = App::new("fig - Figure development cli tools")
-        .version("0.6.1")
-        .author("Stephen C. <scirner@figure.com>")
+    let app = App::new(format!("{} - Figure development cli tools", env!("CARGO_PKG_NAME")))
+        .version(env!("CARGO_PKG_VERSION"))
+        .author(env!("CARGO_PKG_AUTHORS"))
         .arg(config_arg)
         .subcommand(SubCommand::with_name(DOCTOR)
             .about("Checks if all required dependencies are installed")
@@ -428,6 +431,33 @@ fn main() -> Result<()> {
                 .about("List configurations available for the current directory")
             )
         )
+        .subcommand(SubCommand::with_name(PORT_FORWARD)
+            .arg(&Arg::with_name("forward")
+                 .value_name("SPECIFIER")
+                 .required(true)
+                 .takes_value(true)
+                 .help("Forwarding specifier string, like the ssh -L option")
+                 .long_help("The forwarding string is meant to function like ssh's -L option:\n\n\
+                              - <remote-host>:<remote-port>\n- <local-port>:<remote-host>:<remote-port>\n\n\
+                              If <local-port> is omitted, a random port will be chosen\n")
+            )
+            .arg(&Arg::with_name("context")
+                 .required(false)
+                 .value_name("NAME")
+                 .long("context")
+                 .takes_value(true)
+                 .help("The Kubernetes context to use. Overrides the one provided in config")
+            )
+            .arg(&Arg::with_name("namespace")
+                 .required(false)
+                 .value_name("NAME")
+                 .long("namespace")
+                 .short("n")
+                 .takes_value(true)
+                 .help("The kubernetes namespace to use. Overrides the one provided in config")
+            )
+            .about("Perform port forwarding within a Kubernetes cluster")
+        )
         .subcommand(SubCommand::with_name(POSTGRES_CLI)
             .arg(&env_arg)
             .arg(&static_port_arg)
@@ -455,8 +485,8 @@ fn main() -> Result<()> {
                 return Err(FigError::DoctorError("Please make sure all of the above checks are successful!".to_owned()))
             }
         },
-        (CONFIG, Some(config)) => {
-            match config.subcommand() {
+        (CONFIG, Some(values)) => {
+            match values.subcommand() {
                 (CHECK, _) => {
                     config_show_path(config_path, true)?
                 },
@@ -484,10 +514,18 @@ fn main() -> Result<()> {
                 }
             }
         },
-        (POSTGRES_CLI, _) => {
+        (PORT_FORWARD, Some(values)) => {
+            let config = get_config(config_path)?;
+            let forwarding = util::parse_forwarding_string(&(values.value_of("forward")
+                                                             .ok_or(FigError::ParseError("Could not parse remote string".to_owned()))?))?;
+            let context = values.value_of("context");
+            let namespace = values.value_of("namespace");
+
+            k8s_port_forward(config.port_forward.as_ref(), &forwarding, context, namespace)?
+        },
+        (POSTGRES_CLI, Some(values)) => {
             // TODO on this error make sure printed messages shows you how to create a config file
             let config = get_config(config_path)?;
-            let values = args.subcommand_matches(POSTGRES_CLI).unwrap();
             let port = match value_t!(values.value_of("port"), u16) {
                 Ok(port) => Ok(Some(port)),
                 Err(e) => match e.kind {

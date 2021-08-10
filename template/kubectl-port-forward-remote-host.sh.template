@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+set -e
+
+function cleanup {{
+  echo "Cleaning up {temp_pod_name}"
+  kubectl {context_arg} {namespace_arg} delete pod/{temp_pod_name} --grace-period 1 --wait=false
+}}
+
+trap cleanup EXIT
+
+kubectl run {context_arg} {namespace_arg} --restart=Never --image=alpine/socat {temp_pod_name} -- -d -d tcp-listen:{remote_port},fork,reuseaddr tcp-connect:{remote_host}:{remote_port}
+kubectl wait {context_arg} {namespace_arg} --for=condition=Ready pod/{temp_pod_name}
+kubectl port-forward {context_arg} {namespace_arg} pod/{temp_pod_name} {local_port}:{remote_port}
+
+echo "{temp_pod_name}"
