@@ -56,15 +56,9 @@ impl PostgresConfig {
 }
 
 #[derive(Deserialize, Debug)]
-#[serde(rename_all = "lowercase")]
-pub enum PortForwardConfigType {
-    Kubernetes { context: String, namespace: String }
-}
-
-#[derive(Deserialize, Debug)]
 pub struct PortForwardConfig {
-    #[serde(rename = "type")]
-    pub _type: PortForwardConfigType,
+    pub context: String,
+    pub namespace: Option<String>
 }
 
 // #[derive(Deserialize, Debug)]

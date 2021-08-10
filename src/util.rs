@@ -65,7 +65,8 @@ pub fn random_alphanum(len: usize) -> String {
         .map(|()| rng.sample(Alphanumeric))
         .map(char::from)
         .take(len)
-        .collect()
+        .collect::<String>()
+        .to_lowercase()
 }
 
 pub fn prompt_on_write<P: AsRef<Path>>(path: P) -> bool {

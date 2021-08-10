@@ -12,7 +12,7 @@ use std::os::unix::fs::OpenOptionsExt;
 
 use consts::*;
 use config::{EnvironmentType, environment_type, get_config};
-use crate::config::{Config, PostgresConfig, PostgresConfigType, PortForwardConfig, PortForwardConfigType};
+use crate::config::{Config, PostgresConfig, PostgresConfigType, PortForwardConfig};
 use crate::util::ForwardingInfo;
 use prettytable::{Table, format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR};
 use crate::runner::run_command;
@@ -67,13 +67,9 @@ fn collect_files<P: AsRef<Path>>(path: P, match_suffix: Option<&str>)  -> Result
 }
 
 fn k8s_port_forward(config: Option<&PortForwardConfig>, forwarding: &ForwardingInfo, context: Option<&str>, namespace: Option<&str>) -> Result<()> {
-    let (config_context, config_namespace) = if let Some(config) = config {
-        match config._type {
-            PortForwardConfigType::Kubernetes { ref context, ref namespace } =>
-                (Some(context.as_str()), Some(namespace.as_str())),
-        }
-    } else {
-        (None, None)
+    let (config_context, config_namespace) = match config {
+        Some(config) => (Some(config.context.as_str()), config.namespace.as_deref()),
+        None => (None, None)
     };
 
     // override the values from the config if `context` and `namespace` are explicitly provided:
