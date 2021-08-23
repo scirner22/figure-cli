@@ -3,20 +3,19 @@ extern crate quick_error;
 #[macro_use]
 extern crate prettytable;
 
-use clap::{App, AppSettings, Arg, SubCommand, value_t};
-use getch::Getch;
-use std::{fs::OpenOptions, fs::File};
-use std::env::{self, temp_dir};
+use clap::{App, Arg, SubCommand, value_t};
+use std::{env, fs};
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{self, Command};
+use std::path::{Path, PathBuf, StripPrefixError};
+use std::process::Command;
+use std::os::unix::fs::OpenOptionsExt;
 
 use consts::*;
 use config::{EnvironmentType, environment_type, get_config};
-use crate::config::{Config, PostgresConfig, PostgresConfigType};
+use crate::config::{Config, PostgresConfig, PostgresConfigType, PortForwardConfig};
+use crate::util::ForwardingInfo;
 use prettytable::{Table, format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR};
 use crate::runner::run_command;
-use uuid::Uuid;
 use walkdir::WalkDir;
 
 mod config;
@@ -37,37 +36,99 @@ quick_error! {
         IoError(e: std::io::Error) {
             from()
         }
+        StripPrefixError(e: StripPrefixError) {
+            from()
+        }
         TomlError(e: toml::de::Error) {
+            from()
+        }
+        WalkdirError(e: walkdir::Error) {
             from()
         }
     }
 }
 
-fn postgres_shell_cmd(postgres_config: &PostgresConfig, port: u16) -> Command {
-    let mut cmd = Command::new("psql");
+/// Recursively walks `path`, collecting any files, optionally filtering by
+/// suffix
+fn collect_files<P: AsRef<Path>>(path: P, match_suffix: Option<&str>)  -> Result<Vec<PathBuf>> {
+    let mut paths = WalkDir::new(path.as_ref())
+        .into_iter()
+        .map(|e| e.map(|p| p.path().to_path_buf()))
+        .collect::<std::result::Result<Vec<PathBuf>, walkdir::Error>>()
+        .map_err(Into::<FigError>::into)?;
+    if let Some(suffix) = match_suffix {
+        paths = paths
+            .into_iter()
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some(suffix))
+            .collect::<Vec<_>>();
+    }
+    paths.sort();
+    Ok(paths)
+}
 
-    let port = match &postgres_config._type {
-        PostgresConfigType::Kubernetes { .. } => port,
-        PostgresConfigType::GCloudProxy { .. } => port,
-        PostgresConfigType::Direct => postgres_config.port(),
+fn k8s_port_forward(config: Option<&PortForwardConfig>, forwarding: &ForwardingInfo, context: Option<&str>, namespace: Option<&str>) -> Result<()> {
+    let (config_context, config_namespace) = match config {
+        Some(config) => (Some(config.context.as_str()), config.namespace.as_deref()),
+        None => (None, None)
     };
 
-    cmd.env("PGPASSWORD", &postgres_config.password);
-    cmd.env("PGOPTIONS", format!("--search_path={}", &postgres_config.schema()));
+    // override the values from the config if `context` and `namespace` are explicitly provided:
+    let context_arg = context.or(config_context)
+        .map_or_else(|| "".to_owned(), |c| format!("--context={}", c));
+    let namespace_arg = namespace.or(config_namespace)
+        .map_or_else(|| "".to_owned(), |n| format!("--namespace={}", n));
+    let pod_name = format!("figcli-temp-port-forward-{}", util::random_alphanum(8));
+
+    let source_contents = format!(include_str!("../template/kubectl-port-forward-remote-host.sh.template"),
+                                  temp_pod_name=pod_name,
+                                  context_arg=context_arg,
+                                  namespace_arg=namespace_arg,
+                                  local_port=forwarding.local_port,
+                                  remote_host=forwarding.remote_host,
+                                  remote_port=forwarding.remote_port);
+
+    // Write the parameterized template out as a shell script to execute:
+    let shell_script_name = util::temp_file("sh");
+    let mut shell_script_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .open(&shell_script_name)?;
+
+    shell_script_file.write_all(source_contents.as_bytes())?;
+
+    let mut port_forward_script = Command::new(shell_script_name.to_str().unwrap());
+
+    println!("Forwarding {}:{} -> {}", forwarding.remote_host, forwarding.remote_port, forwarding.local_port);
+
+    runner::run_command(&mut port_forward_script, None, false)
+}
+
+fn postgres_shell_cmd(config: &PostgresConfig, port: u16) -> Command {
+    let mut cmd = Command::new("psql");
+
+    let port = match &config._type {
+        PostgresConfigType::Kubernetes { .. } => port,
+        PostgresConfigType::GCloudProxy { .. } => port,
+        PostgresConfigType::Direct => config.port(),
+    };
+
+    cmd.env("PGPASSWORD", &config.password);
+    cmd.env("PGOPTIONS", format!("--search_path={}", &config.schema()));
     cmd.args(
         vec![
-            "-h", &postgres_config.host(),
-            "-U", &postgres_config.user,
+            "-h", &config.host(),
+            "-U", &config.user,
             "-p", &port.to_string(),
-            &postgres_config.database,
+            &config.database,
         ]
     );
 
     return cmd
 }
 
-fn postgres_tunnel_cmd(postgres_config: &PostgresConfig, port: u16) -> Result<Option<Command>> {
-    match &postgres_config._type {
+fn postgres_tunnel_cmd(config: &PostgresConfig, port: u16) -> Result<Option<Command>> {
+    match &config._type {
         PostgresConfigType::Kubernetes { context, namespace, deployment } => {
             let mut cmd = Command::new("kubectl");
             cmd.args(
@@ -76,7 +137,7 @@ fn postgres_tunnel_cmd(postgres_config: &PostgresConfig, port: u16) -> Result<Op
                     "--namespace", namespace,
                     "port-forward",
                     &format!("deployment/{}", deployment),
-                    &format!("{}:{}", port, &postgres_config.port()),
+                    &format!("{}:{}", port, &config.port()),
                 ]
             );
 
@@ -94,51 +155,25 @@ fn postgres_tunnel_cmd(postgres_config: &PostgresConfig, port: u16) -> Result<Op
         }
 }
 
-fn temp_file(extension: &str) -> PathBuf {
-    let mut dir = temp_dir();
-    let file_name = format!("{}.{}", Uuid::new_v4(), extension);
+fn postgres_pgbouncer_cmd(config: &PostgresConfig, port: u16, upstream_port: u16) -> Result<Command> {
+    let userlist_file_path_str = util::temp_file("txt");
+    let mut userlist_file = fs::File::create(&userlist_file_path_str)?;
+    let ini_file_path_str = util::temp_file("ini");
+    let mut ini_file = fs::File::create(&ini_file_path_str)?;
 
-    dir.push(file_name);
-
-    dir
-}
-
-fn postgres_pgbouncer_cmd(postgres_config: &PostgresConfig, port: u16, upstream_port: u16) -> Result<Command> {
-    let userlist_file_path_str = temp_file("txt");
-    let mut userlist_file = File::create(userlist_file_path_str.clone())?;
-    let ini_file_path_str = temp_file("ini");
-    let mut ini_file = File::create(ini_file_path_str.clone())?;
-
-    userlist_file.write_all(format!("\"{}\" \"{}\"", &postgres_config.user, &postgres_config.password).as_bytes())?;
+    userlist_file.write_all(format!("\"{}\" \"{}\"", &config.user, &config.password).as_bytes())?;
 
     // TODO change to md5 hash of password
     // TODO remove
-    println!("{}", ini_file_path_str.to_str().unwrap());
-    println!("\"{}\" \"{}\"", &postgres_config.user, &postgres_config.password);
+    println!("{}", ini_file_path_str.display());
+    println!("\"{}\" \"{}\"", &config.user, &config.password);
 
-    let ini_content = format!(
-        r#"################## fig-cli pgbouncer configuration ##################
-
-[databases]
-{} = host=localhost port={} user={} dbname={} password={}
-
-[pgbouncer]
-listen_addr = 0.0.0.0
-listen_port = {}
-unix_socket_dir =
-auth_type = any
-pool_mode = transaction
-default_pool_size = 1
-ignore_startup_parameters = extra_float_digits
-
-################## end file ##################
-"#,
-        postgres_config.database,
-        upstream_port,
-        postgres_config.user,
-        postgres_config.database,
-        postgres_config.password,
-        port,
+    let ini_content = format!(include_str!("../template/pgbouncer.toml.template"),
+        database=config.database,
+        upstream_port=upstream_port,
+        user=config.user,
+        password=config.password,
+        listen_port=port
     );
 
     ini_file.write_all(ini_content.as_bytes())?;
@@ -154,10 +189,10 @@ ignore_startup_parameters = extra_float_digits
 
     table.add_row(row![
         "connection string",
-        format!("postgresql://localhost:{}/{}", port, postgres_config.database)]);
+        format!("postgresql://localhost:{}/{}", port, config.database)]);
     table.add_row(row!["host", "localhost"]);
     table.add_row(row!["port", port.to_string()]);
-    table.add_row(row!["database", postgres_config.database]);
+    table.add_row(row!["database", config.database]);
 
     table.printstd();
 
@@ -174,7 +209,7 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>, port: Option<u16>, inter
         },
     };
 
-    let config = match environment_type(env)? {
+    let postgres_config = match environment_type(env)? {
         EnvironmentType::Local => {
             config.postgres_local.as_ref().ok_or(FigError::ConfigError("[postgres_local] block is invalid".to_owned()))?
         },
@@ -188,8 +223,8 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>, port: Option<u16>, inter
 
     if interative_shell {
         runner::run_command(
-            &mut postgres_shell_cmd(config, port),
-            postgres_tunnel_cmd(config, port)?.as_mut(),
+            &mut postgres_shell_cmd(postgres_config, port),
+            postgres_tunnel_cmd(postgres_config, port)?.as_mut(),
             false,
         )
     } else {
@@ -197,8 +232,8 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>, port: Option<u16>, inter
         println!("Using random open port for bridge {}", bridge_port);
 
         runner::run_command(
-            &mut postgres_pgbouncer_cmd(config, port, bridge_port)?,
-            postgres_tunnel_cmd(config, bridge_port)?.as_mut(),
+            &mut postgres_pgbouncer_cmd(postgres_config, port, bridge_port)?,
+            postgres_tunnel_cmd(postgres_config, bridge_port)?.as_mut(),
             false,
         )
     }
@@ -213,65 +248,66 @@ fn doctor_cmd(cmd: &str, args: Vec<&str>) -> Result<()> {
         .map_err(|e| { println!("[ ] {} is not installed", cmd); e })
 }
 
-fn config_init_cmd<P: AsRef<Path>>(path: P, force: bool) -> Result<()> {
+fn config_init_cmd<P: AsRef<Path>>(path: P, force: bool, from: Option<(P, P)>) -> Result<()> {
+
     let write_file = if force {
         true
     } else {
-        if path.as_ref().exists() {
-            println!("\n\"{}\" already exists.\n\nOverwrite [y/n]?", path.as_ref().to_str().unwrap());
-            let ch = Getch::new().getch().unwrap_or(0) as char;
-            ch == 'y' || ch == 'Y'
-        } else {
-            true
-        }
+        util::prompt_on_write(&path)
     };
 
     if !write_file {
         return Ok(());
     }
 
-    let mut file = OpenOptions::new()
+    // If a path is supplied, copy an existing configuration file to create a
+    // new configuration.
+    // - `config_file_base_path` is base location of configuration files
+    // - `app_config_path` the path, as it appears in `config list -A`, e.g.
+    //   "figure-cli/provenance.toml"
+    // - `path` is the destination path of the configuration file to be written
+    if let Some((app_config_path, config_file_base_path)) = from {
+        let target_config_file: Option<(PathBuf, PathBuf)> = collect_files(&config_file_base_path, Some("toml"))?
+            .into_iter()
+            .flat_map(|p| p.strip_prefix(config_file_base_path.as_ref()).map(|p_prefix| (p.clone(), p_prefix.to_path_buf())))
+            .find(|(_, prefix_path)| prefix_path == app_config_path.as_ref());
+
+        return match target_config_file {
+            Some((app_config_full_path, _)) => {
+                let result = fs::copy(app_config_full_path, &path)
+                    .map(|_| ())
+                    .map_err(Into::into);
+                println!("Writing config file to {}", path.as_ref().display());
+                result
+            }
+            None => Err(FigError::ConfigError(format!("Can't copy configuration {}", app_config_path.as_ref().display())))
+        }
+    }
+
+    let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path.as_ref())?;
 
-    println!("Writing config file to {}", path.as_ref().to_str().unwrap());
-
-    file.write_all(
-        br##"# fig-cli configuration
-
-[postgres_local]
-type = "direct"
-user = "postgres"
-password = "password1"
-database = "object_store"
-schema = "object_store"
-
-[postgres_test]
-type = { kubernetes = { context = "gke_figure-development_us-east1-b_tf-test", namespace = "p8e", deployment = "p8e-api-db-deployment" } }
-user = "p8e-api"
-password = "password1"
-database = "p8e-api"
-schema = "p8e-api"
-
-[postgres_prod]
-type = { gcloudproxy = { instance = "figure-production:us-east1:service-identity-db" } }
-user = "<insert user name>"
-password = "<insert password>"
-database = "service-identity-db"
-schema = "service_identity"
-"##)?;
+    println!("Writing config file to {}", path.as_ref().display());
+    file.write_all(include_bytes!("../template/config.toml.example"))?;
 
     Ok(())
 }
 
+fn config_show_contents<P: AsRef<Path>>(path: P) -> Result<()> {
+    let contents = fs::read_to_string(path.as_ref())?;
+    println!("{}", contents);
+    Ok(())
+}
+
 fn config_show_path<P: AsRef<Path>>(path: P, check: bool) -> Result<()> {
-    let file_path = path.as_ref().to_str().unwrap();
+    let path = path.as_ref();
     if check {
-        let exists = path.as_ref().exists();
-        println!("Checking - {} {}", file_path, if exists { GREEN_CHECK_ICON } else { RED_X_ICON });
+        let exists = path.exists();
+        println!("Checking - {} {}", path.display(), if exists { GREEN_CHECK_ICON } else { RED_X_ICON });
     } else {
-        println!("{}", file_path);
+        println!("{}", path.display());
     }
     Ok(())
 }
@@ -287,31 +323,30 @@ fn config_edit_path<P: AsRef<Path>>(path: P) -> Result<()> {
 }
 
 fn config_list_files<P: AsRef<Path>>(path: P)  -> Result<()> {
-    let walker = WalkDir::new(path.as_ref());
-    for entry in walker {
-        let entry = entry.unwrap();
-        let p = entry.path();
-        if entry.path().extension().and_then(|s| s.to_str()) == Some("toml") {
-            println!("{}", p.strip_prefix(path.as_ref()).unwrap().display());
-        }
+    for p in collect_files(&path, Some("toml"))? {
+        println!("{}", p.strip_prefix(&path)?.display());
     }
     Ok(())
 }
 
 fn main() -> Result<()> {
-    let mut default_config_path = dirs::config_dir().unwrap();
-    default_config_path.push(FIG_CONFIG_DIR);
-    let toml_file_config_base = default_config_path.clone();
 
-    if !std::path::Path::new(&default_config_path).exists() {
-        std::fs::create_dir(&default_config_path)?;
-    }
+    let (default_config_path, base_config_path) = {
+        let mut default_config_path = dirs::config_dir().unwrap();
+        default_config_path.push(FIG_CONFIG_DIR);
+        let base_config_path = default_config_path.clone();
 
-    default_config_path.push(std::env::current_dir()?.file_name().unwrap());
-    if !std::path::Path::new(&default_config_path).exists() {
-        std::fs::create_dir(&default_config_path)?;
-    }
-    let default_config_path_copy = default_config_path.clone();
+        if !std::path::Path::new(&default_config_path).exists() {
+            std::fs::create_dir(&default_config_path)?;
+        }
+
+        default_config_path.push(std::env::current_dir()?.file_name().unwrap());
+        if !std::path::Path::new(&default_config_path).exists() {
+            std::fs::create_dir(&default_config_path)?;
+        }
+
+        (default_config_path, base_config_path)
+    };
 
     let static_port_arg = Arg::with_name("port")
         .short("p")
@@ -322,7 +357,6 @@ fn main() -> Result<()> {
     let interactive_shell_args = Arg::with_name("shell")
         .short("s")
         .long("shell")
-        .value_name("SHELL")
         .takes_value(false)
         .help("Optionally starts a psql shell.");
     let env_arg = Arg::with_name("environment")
@@ -336,9 +370,10 @@ fn main() -> Result<()> {
         .help("Environment to apply SUBCOMMAND to.");
     let config_arg = Arg::with_name("config")
         .required(false)
+        .global(true)
         .short("c")
         .long("config")
-        .value_name("CONF")
+        .value_name("FILE")
         .takes_value(true)
         .default_value("default")
         .help("Config name to read toml configuration from.");
@@ -346,14 +381,12 @@ fn main() -> Result<()> {
         .required(false)
         .long("force")
         .short("f")
-        .value_name("FORCE")
         .takes_value(false)
         .help("Force the action without prompting for confirmation");
 
-    let mut app = App::new("fig - Figure development cli tools")
-        .setting(AppSettings::ArgRequiredElseHelp)
-        .version("0.6.1")
-        .author("Stephen C. <scirner@figure.com>")
+    let app = App::new(format!("{} - Figure development cli tools", env!("CARGO_PKG_NAME")))
+        .version(env!("CARGO_PKG_VERSION"))
+        .author(env!("CARGO_PKG_AUTHORS"))
         .arg(config_arg)
         .subcommand(SubCommand::with_name(DOCTOR)
             .about("Checks if all required dependencies are installed")
@@ -368,22 +401,58 @@ fn main() -> Result<()> {
             )
             .subcommand(SubCommand::with_name(INIT)
                 .arg(&force_arg)
+                .arg(&Arg::with_name("from")
+                    .required(false)
+                    .long("from")
+                    .value_name("FILE")
+                    .takes_value(true)
+                    .help("Copy an existing configuration file")
+                )
                 .about("Installs a stub configuration file with examples to help with setup")
             )
-            .subcommand(SubCommand::with_name(SHOW)
+            .subcommand(SubCommand::with_name(PATH)
                 .about("Prints the location of the configuration file that will be used")
+            )
+            .subcommand(SubCommand::with_name(SHOW)
+                .about("Prints the contents of the configuration file that will be used")
             )
             .subcommand(SubCommand::with_name(LIST)
                 .arg(&Arg::with_name("all")
                     .required(false)
                     .long("all")
                     .short("A")
-                    .value_name("ALL")
                     .takes_value(false)
                     .help("List all configuration files regardless of the current directory")
                 )
                 .about("List configurations available for the current directory")
             )
+        )
+        .subcommand(SubCommand::with_name(PORT_FORWARD)
+            .arg(&Arg::with_name("forward")
+                 .value_name("SPECIFIER")
+                 .required(true)
+                 .takes_value(true)
+                 .help("Forwarding specifier string, like the ssh -L option")
+                 .long_help("The forwarding string is meant to function like ssh's -L option:\n\n\
+                              - <remote-host>:<remote-port>\n- <local-port>:<remote-host>:<remote-port>\n\n\
+                              If <local-port> is omitted, a random port will be chosen\n")
+            )
+            .arg(&Arg::with_name("context")
+                 .required(false)
+                 .value_name("NAME")
+                 .long("context")
+                 .takes_value(true)
+                 .help("The Kubernetes context to use. Overrides the one provided in config")
+            )
+            .arg(&Arg::with_name("namespace")
+                 .required(false)
+                 .value_name("NAME")
+                 .long("namespace")
+                 .short("n")
+                 .takes_value(true)
+                 .help("The kubernetes namespace to use. Overrides the one provided in config")
+            )
+            .about("Perform port forwarding within a Kubernetes cluster")
         )
         .subcommand(SubCommand::with_name(POSTGRES_CLI)
             .arg(&env_arg)
@@ -392,16 +461,10 @@ fn main() -> Result<()> {
             .about("Proxies a remote postgres connection")
         );
 
-    let raw_args = env::args();
-    let args = match app.get_matches_from_safe_borrow(raw_args) {
-        Ok(args) => args,
-        Err(e) => {
-           eprintln!("{}", e);
-           process::exit(1);
-        }
-    };
+    let mut app_help = app.clone();
+    let args = app.get_matches();
 
-    let mut config_path = default_config_path;
+    let mut config_path = default_config_path.clone();
     config_path.push(args.value_of("config").unwrap());
     config_path.set_extension("toml");
 
@@ -418,8 +481,8 @@ fn main() -> Result<()> {
                 return Err(FigError::DoctorError("Please make sure all of the above checks are successful!".to_owned()))
             }
         },
-        (CONFIG, Some(config)) => {
-            match config.subcommand() {
+        (CONFIG, Some(values)) => {
+            match values.subcommand() {
                 (CHECK, _) => {
                     config_show_path(config_path, true)?
                 },
@@ -427,28 +490,38 @@ fn main() -> Result<()> {
                     config_edit_path(config_path)?
                 },
                 (INIT, Some(init)) => {
-                    config_init_cmd(config_path, init.is_present("force"))?
+                    config_init_cmd(config_path, init.is_present("force"), init.value_of("from").map(|p| (PathBuf::from(p), base_config_path)))?
                 },
                 (LIST, Some(list)) => {
-                    let use_base_dir = if list.is_present("all") {
-                        toml_file_config_base
+                    config_list_files(if list.is_present("all") {
+                        &base_config_path
                     } else {
-                        default_config_path_copy
-                    };
-                    config_list_files(use_base_dir)?
+                        &default_config_path
+                    })?
                 },
-                (SHOW, _) => {
+                (PATH, _) => {
                     config_show_path(config_path, false)?
                 },
+                (SHOW, _) => {
+                    config_show_contents(config_path)?
+                },
                 _ => {
-                    app.print_help().unwrap();
+                    app_help.print_help().unwrap();
                 }
             }
         },
-        (POSTGRES_CLI, _) => {
+        (PORT_FORWARD, Some(values)) => {
+            let config = get_config(config_path)?;
+            let forwarding = util::parse_forwarding_string(&(values.value_of("forward")
+                                                             .ok_or(FigError::ParseError("Could not parse remote string".to_owned()))?))?;
+            let context = values.value_of("context");
+            let namespace = values.value_of("namespace");
+
+            k8s_port_forward(config.port_forward.as_ref(), &forwarding, context, namespace)?
+        },
+        (POSTGRES_CLI, Some(values)) => {
             // TODO on this error make sure printed messages shows you how to create a config file
             let config = get_config(config_path)?;
-            let values = args.subcommand_matches(POSTGRES_CLI).unwrap();
             let port = match value_t!(values.value_of("port"), u16) {
                 Ok(port) => Ok(Some(port)),
                 Err(e) => match e.kind {
@@ -464,7 +537,7 @@ fn main() -> Result<()> {
         },
         _ => {
             // print help by default:
-            app.print_help().unwrap();
+            app_help.print_help().unwrap();
         }
     }
 

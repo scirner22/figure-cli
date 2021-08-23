@@ -20,3 +20,4 @@ user = "<insert user name>"
 password = "<insert password>"
 database = "service-identity-db"
 schema = "service_identity"
+
