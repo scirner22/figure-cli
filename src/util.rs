@@ -60,13 +60,6 @@ pub fn parse_forwarding_string(host: &str) -> Result<ForwardingInfo, io::Error> 
     }
 }
 
-pub fn temp_file(extension: &str) -> PathBuf {
-    let mut dir = temp_dir();
-    let file_name = format!("{}.{}", Uuid::new_v4(), extension);
-    dir.push(file_name);
-    dir
-}
-
 /// From https://docs.rs/rand/0.8.4/rand/distributions/struct.Alphanumeric.html
 pub fn random_alphanum(len: usize) -> String {
     let mut rng = thread_rng();

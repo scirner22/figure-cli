@@ -301,12 +301,6 @@ fn config_show_contents<P: AsRef<Path>>(path: P) -> Result<()> {
     Ok(())
 }
 
-fn config_show_contents<P: AsRef<Path>>(path: P) -> Result<()> {
-    let contents = fs::read_to_string(path.as_ref())?;
-    println!("{}", contents);
-    Ok(())
-}
-
 fn config_show_path<P: AsRef<Path>>(path: P, check: bool) -> Result<()> {
     let path = path.as_ref();
     if check {
