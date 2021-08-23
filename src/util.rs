@@ -20,6 +20,15 @@ pub fn find_available_port() -> Result<u16, std::io::Error> {
     Ok(UdpSocket::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
+pub fn temp_file(extension: &str) -> PathBuf {
+    let mut dir = temp_dir();
+    let file_name = format!("{}.{}", Uuid::new_v4(), extension);
+
+    dir.push(file_name);
+
+    dir
+}
+
 /// Parses a string of the "<local-port>:<remote-host>:<remote-port>" or
 /// "<remote-host>:<remote-port>"
 pub fn parse_forwarding_string(host: &str) -> Result<ForwardingInfo, io::Error> {
