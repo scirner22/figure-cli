@@ -1,7 +1,7 @@
+use crate::FigError::EnvError;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
-use crate::FigError::EnvError;
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
@@ -13,7 +13,6 @@ pub struct Config {
 
     // exec_test: Option<ExecConfig>,
     // exec_prod: Option<ExecConfig>,
-
     pub port_forward: Option<PortForwardConfig>,
 
     pub postgres_local: Option<PostgresConfig>,
@@ -24,8 +23,14 @@ pub struct Config {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum PostgresConfigType {
-    Kubernetes { context: String, namespace: String, deployment: String },
-    GCloudProxy { instance: String },
+    Kubernetes {
+        context: String,
+        namespace: String,
+        deployment: String,
+    },
+    GCloudProxy {
+        instance: String,
+    },
     Direct,
 }
 
@@ -36,7 +41,7 @@ pub struct PostgresConfig {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: String,
-    pub password: String,
+    pub password: Option<String>,
     pub database: String,
     pub schema: Option<String>,
 }
@@ -58,7 +63,7 @@ impl PostgresConfig {
 #[derive(Deserialize, Debug)]
 pub struct PortForwardConfig {
     pub context: String,
-    pub namespace: Option<String>
+    pub namespace: Option<String>,
 }
 
 // #[derive(Deserialize, Debug)]
@@ -91,13 +96,12 @@ pub fn environment_type(env: Option<&str>) -> crate::Result<EnvironmentType> {
         Some(crate::LOCAL) => Ok(EnvironmentType::Local),
         Some(crate::TEST) => Ok(EnvironmentType::Test),
         Some(crate::PRODUCTION) => Ok(EnvironmentType::Production),
-        _ => Err(EnvError("environment not set".to_owned()))
+        _ => Err(EnvError("environment not set".to_owned())),
     }
 }
 
 pub fn get_config<P: AsRef<Path>>(path: P) -> crate::Result<Config> {
     let toml_string = fs::read_to_string(path)?;
 
-    toml::from_str(&toml_string)
-        .map_err(From::from)
+    toml::from_str(&toml_string).map_err(From::from)
 }
