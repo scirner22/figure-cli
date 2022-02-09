@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf, StripPrefixError};
 use std::process::Command;
 use std::{env, fs};
 
-use crate::config::{Config, PortForwardConfig, PostgresConfig, PostgresConfigType};
+use crate::config::{Config, PortForwardConfig, PostgresConfig, ServerConfigType};
 use crate::runner::run_command;
 use crate::util::ForwardingInfo;
 use config::{environment_type, get_config, EnvironmentType};
@@ -120,9 +120,9 @@ fn postgres_shell_cmd(config: &PostgresConfig, port: u16) -> Command {
     let mut cmd = Command::new("psql");
 
     let port = match &config._type {
-        PostgresConfigType::Kubernetes { .. } => port,
-        PostgresConfigType::GCloudProxy { .. } => port,
-        PostgresConfigType::Direct => config.port(),
+        ServerConfigType::Kubernetes { .. } => port,
+        ServerConfigType::GCloudProxy { .. } => port,
+        ServerConfigType::Direct => config.port(),
     };
 
     if let Some(password) = &config.password {
@@ -145,31 +145,33 @@ fn postgres_shell_cmd(config: &PostgresConfig, port: u16) -> Command {
 
 fn postgres_tunnel_cmd(config: &PostgresConfig, port: u16) -> Result<Option<Command>> {
     match &config._type {
-        PostgresConfigType::Kubernetes {
+        ServerConfigType::Kubernetes {
             context,
             namespace,
             deployment,
+            container,
         } => {
             let mut cmd = Command::new("kubectl");
-            cmd.args(vec![
-                "--context",
-                context,
-                "--namespace",
-                namespace,
-                "port-forward",
-                &format!("deployment/{}", deployment),
-                &format!("{}:{}", port, &config.port()),
-            ]);
+            let deployment_spec = format!("deployment/{}", deployment);
+            let port_mapping_spec = format!("{}:{}", port, &config.port());
+
+            let mut parts: Vec<&str> = vec!["--context", context, "--namespace", namespace];
+            if let Some(container) = container {
+                parts.extend(&vec!["-c", container]);
+            }
+            parts.extend(&vec!["port-forward", &deployment_spec, &port_mapping_spec]);
+
+            cmd.args(parts);
 
             Ok(Some(cmd))
         }
-        PostgresConfigType::GCloudProxy { instance } => {
+        ServerConfigType::GCloudProxy { instance } => {
             let mut cmd = Command::new("cloud_sql_proxy");
             cmd.args(vec!["-instances", &format!("{}=tcp:{}", instance, port)]);
 
             Ok(Some(cmd))
         }
-        PostgresConfigType::Direct => Ok(None),
+        ServerConfigType::Direct => Ok(None),
     }
 }
 
