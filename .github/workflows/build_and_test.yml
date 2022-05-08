@@ -1,0 +1,51 @@
+name: Build and Test
+on:
+  push:
+    branches:
+      - develop
+      - master
+  pull_request:
+
+jobs:
+  build_and_lint:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Update apt
+        run: sudo apt-get -y update
+      - name: Install support tools
+        run: sudo apt-get install -y cmake libssl-dev
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: clippy
+      - uses: Swatinem/rust-cache@v1
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+      - uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --all-features
+
+            # test:
+            #   runs-on: [self-hosted, linux]
+            #   steps:
+            #     - name: Update apt
+            #       run: sudo apt-get -y update
+            #     - name: Install support tools
+            #       run: sudo apt-get install -y cmake libssl-dev
+            #     - uses: actions/checkout@v3
+            #     - uses: actions-rs/toolchain@v1
+            #       with:
+            #         profile: minimal
+            #         toolchain: stable
+            #         override: true
+            #     - uses: Swatinem/rust-cache@v1
+            #     - name: Test
+            #       uses: actions-rs/cargo@v1
+            #       with:
+            #         command: test
