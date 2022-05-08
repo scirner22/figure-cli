@@ -329,25 +329,24 @@ fn config_list_files<P: AsRef<Path>>(path: P)  -> Result<()> {
     Ok(())
 }
 
+fn get_config_paths() -> Result<(PathBuf, PathBuf)> {
+    let mut default_config_path = dirs::config_dir().unwrap();
+    default_config_path.push(FIG_CONFIG_DIR);
+    let base_config_path = default_config_path.clone();
+
+    if !std::path::Path::new(&default_config_path).exists() {
+        std::fs::create_dir(&default_config_path)?;
+    }
+
+    default_config_path.push(std::env::current_dir()?.file_name().unwrap());
+    if !std::path::Path::new(&default_config_path).exists() {
+        std::fs::create_dir(&default_config_path)?;
+    }
+
+    Ok((default_config_path, base_config_path))
+}
+
 fn main() -> Result<()> {
-
-    let (default_config_path, base_config_path) = {
-        let mut default_config_path = dirs::config_dir().unwrap();
-        default_config_path.push(FIG_CONFIG_DIR);
-        let base_config_path = default_config_path.clone();
-
-        if !std::path::Path::new(&default_config_path).exists() {
-            std::fs::create_dir(&default_config_path)?;
-        }
-
-        default_config_path.push(std::env::current_dir()?.file_name().unwrap());
-        if !std::path::Path::new(&default_config_path).exists() {
-            std::fs::create_dir(&default_config_path)?;
-        }
-
-        (default_config_path, base_config_path)
-    };
-
     let static_port_arg = Arg::with_name("port")
         .short("p")
         .long("port")
@@ -464,10 +463,6 @@ fn main() -> Result<()> {
     let mut app_help = app.clone();
     let args = app.get_matches();
 
-    let mut config_path = default_config_path.clone();
-    config_path.push(args.value_of("config").unwrap());
-    config_path.set_extension("toml");
-
     match args.subcommand() {
         (DOCTOR, _) => {
             let commands = vec![
@@ -482,6 +477,11 @@ fn main() -> Result<()> {
             }
         },
         (CONFIG, Some(values)) => {
+            let (mut config_path, base_config_path) = get_config_paths()?;
+            let default_config_path = config_path.clone();
+            config_path.push(args.value_of("config").unwrap());
+            config_path.set_extension("toml");
+
             match values.subcommand() {
                 (CHECK, _) => {
                     config_show_path(config_path, true)?
@@ -511,6 +511,10 @@ fn main() -> Result<()> {
             }
         },
         (PORT_FORWARD, Some(values)) => {
+            let (mut config_path, _) = get_config_paths()?;
+            config_path.push(args.value_of("config").unwrap());
+            config_path.set_extension("toml");
+
             let config = get_config(config_path)?;
             let forwarding = util::parse_forwarding_string(&(values.value_of("forward")
                                                              .ok_or(FigError::ParseError("Could not parse remote string".to_owned()))?))?;
@@ -520,6 +524,10 @@ fn main() -> Result<()> {
             k8s_port_forward(config.port_forward.as_ref(), &forwarding, context, namespace)?
         },
         (POSTGRES_CLI, Some(values)) => {
+            let (mut config_path, _) = get_config_paths()?;
+            config_path.push(args.value_of("config").unwrap());
+            config_path.set_extension("toml");
+
             // TODO on this error make sure printed messages shows you how to create a config file
             let config = get_config(config_path)?;
             let port = match value_t!(values.value_of("port"), u16) {
