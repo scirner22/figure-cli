@@ -32,7 +32,7 @@ pub fn temp_file(extension: &str) -> PathBuf {
 /// Parses a string of the "<local-port>:<remote-host>:<remote-port>" or
 /// "<remote-host>:<remote-port>"
 pub fn parse_forwarding_string(host: &str) -> Result<ForwardingInfo, io::Error> {
-    let parts = host.split(":").collect::<Vec<&str>>();
+    let parts = host.split(':').collect::<Vec<&str>>();
     if parts.len() == 3 {
         let local_port = parts[0].parse::<u16>()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;

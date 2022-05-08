@@ -192,7 +192,7 @@ fn postgres_shell_cmd(config: &PostgresConfig, port: u16) -> Command {
         ]
     );
 
-    return cmd
+    cmd
 }
 
 fn postgres_tunnel_cmd(config: &PostgresConfig, port: u16) -> Result<Option<Command>> {
@@ -279,13 +279,13 @@ fn postgres_cli_cmd(config: &Config, env: Option<&str>, port: Option<u16>, inter
 
     let postgres_config = match environment_type(env)? {
         EnvironmentType::Local => {
-            config.postgres_local.as_ref().ok_or(FigError::ConfigError("[postgres_local] block is invalid".to_owned()))?
+            config.postgres_local.as_ref().ok_or_else(|| FigError::ConfigError("[postgres_local] block is invalid".to_owned()))?
         },
         EnvironmentType::Test => {
-            config.postgres_test.as_ref().ok_or(FigError::ConfigError("[postgres_test] block is invalid".to_owned()))?
+            config.postgres_test.as_ref().ok_or_else(|| FigError::ConfigError("[postgres_test] block is invalid".to_owned()))?
         },
         EnvironmentType::Production => {
-            config.postgres_prod.as_ref().ok_or(FigError::ConfigError("[postgres_prod] block is invalid".to_owned()))?
+            config.postgres_prod.as_ref().ok_or_else(|| FigError::ConfigError("[postgres_prod] block is invalid".to_owned()))?
         },
     };
 
@@ -383,7 +383,7 @@ fn config_show_path<P: AsRef<Path>>(path: P, check: bool) -> Result<()> {
 fn config_edit_path<P: AsRef<Path>>(path: P) -> Result<()> {
     let file_path = path.as_ref().to_str().unwrap();
     // use whatever the system envvar "EDITOR" is set to:
-    let system_editor = env::var("EDITOR").unwrap_or(DEFAULT_EDITOR.to_owned());
+    let system_editor = env::var("EDITOR").unwrap_or_else(|_| DEFAULT_EDITOR.to_owned());
     let mut editor_cmd = Command::new(system_editor);
     editor_cmd.arg(file_path);
     runner::run_command(&mut editor_cmd, None, false)?;
@@ -624,8 +624,9 @@ include both the caller and what system they are calling, i.e.
             config_path.set_extension("toml");
 
             let config = get_config(config_path)?;
-            let forwarding = util::parse_forwarding_string(&(values.value_of("forward")
-                                                             .ok_or(FigError::ParseError("Could not parse remote string".to_owned()))?))?;
+            let forward_value = values.value_of("forward")
+                .ok_or_else(|| FigError::ParseError("Could not parse remote string".to_owned()))?;
+            let forwarding = util::parse_forwarding_string(forward_value)?;
             let context = values.value_of("context");
             let namespace = values.value_of("namespace");
 
@@ -657,7 +658,7 @@ include both the caller and what system they are calling, i.e.
             let namespace = values.value_of("namespace").unwrap();
             let acl_group = values.value_of("acl-group").unwrap();
 
-            generate_kong_api_keys(&namespace, &name, &acl_group, &uuid)?;
+            generate_kong_api_keys(namespace, name, acl_group, &uuid)?;
         },
         _ => {
             // print help by default:
