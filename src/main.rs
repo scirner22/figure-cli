@@ -3,20 +3,22 @@ extern crate quick_error;
 #[macro_use]
 extern crate prettytable;
 
-use clap::{App, Arg, SubCommand, value_t};
 use std::{env, fs};
 use std::io::Write;
 use std::path::{Path, PathBuf, StripPrefixError};
 use std::process::Command;
 use std::os::unix::fs::OpenOptionsExt;
 
+use clap::{App, Arg, SubCommand, value_t};
+use prettytable::{Table, format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR};
+use crate::runner::run_command;
+use walkdir::WalkDir;
+use uuid::Uuid;
+
 use consts::*;
 use config::{EnvironmentType, environment_type, get_config};
 use crate::config::{Config, PostgresConfig, PostgresConfigType, PortForwardConfig};
 use crate::util::ForwardingInfo;
-use prettytable::{Table, format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR};
-use crate::runner::run_command;
-use walkdir::WalkDir;
 
 mod config;
 mod consts;
@@ -45,6 +47,9 @@ quick_error! {
         WalkdirError(e: walkdir::Error) {
             from()
         }
+        UuidError(e: uuid::Error) {
+            from()
+        }
     }
 }
 
@@ -64,6 +69,69 @@ fn collect_files<P: AsRef<Path>>(path: P, match_suffix: Option<&str>)  -> Result
     }
     paths.sort();
     Ok(paths)
+}
+
+fn generate_kong_api_keys(namespace: &str, name: &str, acl_group: &str, uuid: &Uuid) -> Result<()> {
+    let kong_resources = format!("---
+apiVersion: configuration.konghq.com/v1
+kind: KongConsumer
+metadata:
+  annotations:
+    konghq.com/plugins: {name}-request-transformer
+    kubernetes.io/ingress.class: kong
+  name: {name}
+  namespace: {namespace}
+username: {name}
+credentials:
+- {name}-kong-keyauth
+- {name}-kong-acl
+---
+apiVersion: configuration.konghq.com/v1
+config:
+  remove:
+    headers:
+    - x-uuid
+    querystring:
+    - apikey
+  add:
+    headers:
+    - x-uuid:{uuid}
+consumerRef: {name}
+kind: KongPlugin
+metadata:
+  name: {name}-request-transformer
+  namespace: {namespace}
+plugin: request-transformer");
+
+    let acl_group = base64::encode(acl_group);
+    let password = util::random_alphanum(50);
+    let password = base64::encode(&password);
+
+    let secret_resources = format!("---
+apiVersion: v1
+data:
+  group: {acl_group}
+  kongCredType: YWNs
+kind: Secret
+metadata:
+  name: {name}-kong-acl
+  namespace: {namespace}
+type: Opaque
+---
+apiVersion: v1
+data:
+  key: {password}
+  kongCredType: a2V5LWF1dGg=
+kind: Secret
+metadata:
+  name: {name}-kong-keyauth
+  namespace: {namespace}
+type: Opaque");
+
+    println!("{}", kong_resources);
+    eprintln!("{}", secret_resources);
+
+    Ok(())
 }
 
 fn k8s_port_forward(config: Option<&PortForwardConfig>, forwarding: &ForwardingInfo, context: Option<&str>, namespace: Option<&str>) -> Result<()> {
@@ -347,6 +415,7 @@ fn get_config_paths() -> Result<(PathBuf, PathBuf)> {
 }
 
 fn main() -> Result<()> {
+    let rand_uuid = Uuid::new_v4().hyphenated().to_string();
     let static_port_arg = Arg::with_name("port")
         .short("p")
         .long("port")
@@ -458,6 +527,45 @@ fn main() -> Result<()> {
             .arg(&static_port_arg)
             .arg(&interactive_shell_args)
             .about("Proxies a remote postgres connection")
+        )
+        .subcommand(SubCommand::with_name(KONG_API_KEY)
+            .arg(&Arg::with_name("name")
+                 .required(true)
+                 .value_name("NAME")
+                 .long("name")
+                 .short("p")
+                 .takes_value(true)
+                 .help("The string used for naming resources.")
+                 .long_help(r#"The string used for naming resources. This naming convention is to
+include both the caller and what system they are calling, i.e.
+"third-party-to-service-identity"."#)
+            )
+            .arg(&Arg::with_name("namespace")
+                 .required(true)
+                 .value_name("NAMESPACE")
+                 .long("namespace")
+                 .short("n")
+                 .takes_value(true)
+                 .help("The kubernetes namespace to use.")
+            )
+            .arg(&Arg::with_name("acl-group")
+                 .required(true)
+                 .value_name("ACL")
+                 .long("acl-group")
+                 .short("a")
+                 .takes_value(true)
+                 .help("The acl group name to use.")
+            )
+            .arg(&Arg::with_name("uuid")
+                 .required(false)
+                 .value_name("UUID")
+                 .long("uuid")
+                 .short("u")
+                 .takes_value(true)
+                 .default_value(&rand_uuid)
+                 .help("Uuid to use during header exchange. Defaults to a random UUID")
+            )
+            .about("Creates a new kong api key")
         );
 
     let mut app_help = app.clone();
@@ -542,6 +650,14 @@ fn main() -> Result<()> {
             let interactive_shell = values.is_present("shell");
 
             postgres_cli_cmd(&config, values.value_of("environment"), port, interactive_shell)?
+        },
+        (KONG_API_KEY, Some(values)) => {
+            let uuid = Uuid::try_parse(values.value_of("uuid").unwrap())?;
+            let name = values.value_of("name").unwrap();
+            let namespace = values.value_of("namespace").unwrap();
+            let acl_group = values.value_of("acl-group").unwrap();
+
+            generate_kong_api_keys(&namespace, &name, &acl_group, &uuid)?;
         },
         _ => {
             // print help by default:
