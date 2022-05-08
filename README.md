@@ -1,5 +1,7 @@
 # Fig
 
+![crates.io](https://img.shields.io/crates/v/figcli.svg)
+
 A command line tool that provides utility functions for developing at Figure.
 
 ## Installation
@@ -14,7 +16,7 @@ $ cargo install figcli
 
 ### Source
 
-```bash 
+```bash
 $ git clone git@github.com:scirner22/figure-cli.git
 $ cd figure-cli/
 $ cargo install --path .
@@ -52,7 +54,7 @@ List available configurations for the current directory
 
 ```bash
 $ cd src/
-$ figcli config list 
+$ figcli config list
 
 provenance.toml
 default.toml
