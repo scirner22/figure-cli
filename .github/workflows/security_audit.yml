@@ -6,7 +6,7 @@ on:
       - '**/Cargo.lock'
 jobs:
   security_audit:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - name: Update apt
         run: sudo apt-get -y update

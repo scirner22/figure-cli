@@ -8,7 +8,7 @@ on:
 
 jobs:
   build_and_lint:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - name: Update apt
         run: sudo apt-get -y update
@@ -32,7 +32,7 @@ jobs:
           args: --all-features
 
             # test:
-            #   runs-on: [self-hosted, linux]
+            #   runs-on: ubuntu-latest
             #   steps:
             #     - name: Update apt
             #       run: sudo apt-get -y update
