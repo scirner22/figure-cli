@@ -9,16 +9,15 @@ use std::path::{Path, PathBuf, StripPrefixError};
 use std::process::Command;
 use std::{env, fs};
 
+use crate::config::{Config, PortForwardConfig, PostgresConfig, ServerConfigType};
 use crate::runner::run_command;
+use crate::util::ForwardingInfo;
 use clap::{value_t, App, Arg, SubCommand};
+use config::{environment_type, get_config, EnvironmentType};
+use consts::*;
 use prettytable::{format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR, Table};
 use uuid::Uuid;
 use walkdir::WalkDir;
-
-use crate::config::{Config, PortForwardConfig, PostgresConfig, PostgresConfigType};
-use crate::util::ForwardingInfo;
-use config::{environment_type, get_config, EnvironmentType};
-use consts::*;
 
 mod config;
 mod consts;
@@ -192,12 +191,15 @@ fn postgres_shell_cmd(config: &PostgresConfig, port: u16) -> Command {
     let mut cmd = Command::new("psql");
 
     let port = match &config._type {
-        PostgresConfigType::Kubernetes { .. } => port,
-        PostgresConfigType::GCloudProxy { .. } => port,
-        PostgresConfigType::Direct => config.port(),
+        ServerConfigType::Kubernetes { .. } => port,
+        ServerConfigType::GCloudProxy { .. } => port,
+        ServerConfigType::Direct => config.port(),
     };
 
-    cmd.env("PGPASSWORD", &config.password);
+    if let Some(password) = &config.password {
+        cmd.env("PGPASSWORD", password);
+    }
+
     cmd.env("PGOPTIONS", format!("--search_path={}", &config.schema()));
     cmd.args(vec![
         "-h",
@@ -214,31 +216,33 @@ fn postgres_shell_cmd(config: &PostgresConfig, port: u16) -> Command {
 
 fn postgres_tunnel_cmd(config: &PostgresConfig, port: u16) -> Result<Option<Command>> {
     match &config._type {
-        PostgresConfigType::Kubernetes {
+        ServerConfigType::Kubernetes {
             context,
             namespace,
             deployment,
+            container,
         } => {
             let mut cmd = Command::new("kubectl");
-            cmd.args(vec![
-                "--context",
-                context,
-                "--namespace",
-                namespace,
-                "port-forward",
-                &format!("deployment/{}", deployment),
-                &format!("{}:{}", port, &config.port()),
-            ]);
+            let deployment_spec = format!("deployment/{}", deployment);
+            let port_mapping_spec = format!("{}:{}", port, &config.port());
+
+            let mut parts: Vec<&str> = vec!["--context", context, "--namespace", namespace];
+            if let Some(container) = container {
+                parts.extend(&vec!["-c", container]);
+            }
+            parts.extend(&vec!["port-forward", &deployment_spec, &port_mapping_spec]);
+
+            cmd.args(parts);
 
             Ok(Some(cmd))
         }
-        PostgresConfigType::GCloudProxy { instance } => {
+        ServerConfigType::GCloudProxy { instance } => {
             let mut cmd = Command::new("cloud_sql_proxy");
             cmd.args(vec!["-instances", &format!("{}=tcp:{}", instance, port)]);
 
             Ok(Some(cmd))
         }
-        PostgresConfigType::Direct => Ok(None),
+        ServerConfigType::Direct => Ok(None),
     }
 }
 
@@ -247,24 +251,24 @@ fn postgres_pgbouncer_cmd(
     port: u16,
     upstream_port: u16,
 ) -> Result<Command> {
-    let userlist_file_path_str = util::temp_file("txt");
-    let mut userlist_file = fs::File::create(&userlist_file_path_str)?;
     let ini_file_path_str = util::temp_file("ini");
     let mut ini_file = fs::File::create(&ini_file_path_str)?;
 
-    userlist_file.write_all(format!("\"{}\" \"{}\"", &config.user, &config.password).as_bytes())?;
+    let password = config.password.as_ref().ok_or_else(|| {
+        FigError::ConfigError("password required when using pgbouncer".to_owned())
+    })?;
 
     // TODO change to md5 hash of password
     // TODO remove
     println!("{}", ini_file_path_str.display());
-    println!("\"{}\" \"{}\"", &config.user, &config.password);
+    println!("\"{}\" \"{}\"", &config.user, &password);
 
     let ini_content = format!(
         include_str!("../template/pgbouncer.toml.template"),
         database = config.database,
         upstream_port = upstream_port,
         user = config.user,
-        password = config.password,
+        password = password,
         listen_port = port
     );
 
@@ -297,6 +301,7 @@ fn postgres_cli_cmd(
     env: Option<&str>,
     port: Option<u16>,
     interative_shell: bool,
+    use_pgbouncer: bool,
 ) -> Result<()> {
     let port = match port {
         Some(port) => port,
@@ -326,15 +331,22 @@ fn postgres_cli_cmd(
             postgres_tunnel_cmd(postgres_config, port)?.as_mut(),
             false,
         )
-    } else {
+    } else if use_pgbouncer {
         let bridge_port = util::find_available_port()?;
-        println!("Using random open port for bridge {}", bridge_port);
-
+        println!(
+            "Using pgbouncer with random open port for bridge {}",
+            bridge_port
+        );
         runner::run_command(
             &mut postgres_pgbouncer_cmd(postgres_config, port, bridge_port)?,
             postgres_tunnel_cmd(postgres_config, bridge_port)?.as_mut(),
             false,
         )
+    } else {
+        println!("Using default port forwarding");
+        let mut forward_command = postgres_tunnel_cmd(postgres_config, port)?
+            .expect("couldn't build port-forward command");
+        runner::run_command(&mut forward_command, None, false)
     }
 }
 
@@ -459,6 +471,22 @@ fn get_config_paths() -> Result<(PathBuf, PathBuf)> {
 }
 
 fn main() -> Result<()> {
+    let (default_config_path, base_config_path) = {
+        let mut default_config_path = dirs::config_dir().unwrap();
+        default_config_path.push(FIG_CONFIG_DIR);
+        let base_config_path = default_config_path.clone();
+
+        if !std::path::Path::new(&default_config_path).exists() {
+            std::fs::create_dir(&default_config_path)?;
+        }
+
+        default_config_path.push(std::env::current_dir()?.file_name().unwrap());
+        if !std::path::Path::new(&default_config_path).exists() {
+            std::fs::create_dir(&default_config_path)?;
+        }
+
+        (default_config_path, base_config_path)
+    };
     let rand_uuid = Uuid::new_v4().hyphenated().to_string();
     let static_port_arg = Arg::with_name("port")
         .short("p")
@@ -466,11 +494,16 @@ fn main() -> Result<()> {
         .value_name("PORT")
         .takes_value(true)
         .help("Optional static port. If omitted, a random open port is chosen.");
-    let interactive_shell_args = Arg::with_name("shell")
+    let interactive_shell_arg = Arg::with_name("shell")
         .short("s")
         .long("shell")
         .takes_value(false)
         .help("Optionally starts a psql shell.");
+    let pgbouncer_arg = Arg::with_name("pgbouncer")
+        .long("pgbouncer")
+        .value_name("PGBOUNCER")
+        .takes_value(false)
+        .help("Enable pgbouncer usage for tunnelling. If not provided with kubectl or some other method. Not compatible with --shell");
     let env_arg = Arg::with_name("environment")
         .required(true)
         .index(1)
@@ -569,7 +602,8 @@ fn main() -> Result<()> {
         .subcommand(SubCommand::with_name(POSTGRES_CLI)
             .arg(&env_arg)
             .arg(&static_port_arg)
-            .arg(&interactive_shell_args)
+            .arg(&interactive_shell_arg)
+            .arg(&pgbouncer_arg)
             .about("Proxies a remote postgres connection")
         )
         .subcommand(SubCommand::with_name(KONG_API_KEY)
@@ -615,6 +649,10 @@ include both the caller and what system they are calling, i.e.
     let mut app_help = app.clone();
     let args = app.get_matches();
 
+    let mut config_path = default_config_path.clone();
+    config_path.push(args.value_of("config").unwrap());
+    config_path.set_extension("toml");
+
     match args.subcommand() {
         (DOCTOR, _) => {
             let commands = vec![
@@ -630,33 +668,54 @@ include both the caller and what system they are calling, i.e.
                 ));
             }
         }
-        (CONFIG, Some(values)) => {
-            let (mut config_path, base_config_path) = get_config_paths()?;
-            let default_config_path = config_path.clone();
-            config_path.push(args.value_of("config").unwrap());
-            config_path.set_extension("toml");
+        // <<<<<<< HEAD
+        (CONFIG, Some(values)) => match values.subcommand() {
+            (CHECK, _) => config_show_path(config_path, true)?,
+            (EDIT, _) => config_edit_path(config_path)?,
+            (INIT, Some(init)) => config_init_cmd(
+                config_path,
+                init.is_present("force"),
+                init.value_of("from")
+                    .map(|p| (PathBuf::from(p), base_config_path)),
+            )?,
+            (LIST, Some(list)) => config_list_files(if list.is_present("all") {
+                &base_config_path
+            } else {
+                &default_config_path
+            })?,
+            (PATH, _) => config_show_path(config_path, false)?,
+            (SHOW, _) => config_show_contents(config_path)?,
+            _ => {
+                app_help.print_help().unwrap();
+                // =======
+                //         (CONFIG, Some(values)) => {
+                //             let (mut config_path, base_config_path) = get_config_paths()?;
+                //             let default_config_path = config_path.clone();
+                //             config_path.push(args.value_of("config").unwrap());
+                //             config_path.set_extension("toml");
 
-            match values.subcommand() {
-                (CHECK, _) => config_show_path(config_path, true)?,
-                (EDIT, _) => config_edit_path(config_path)?,
-                (INIT, Some(init)) => config_init_cmd(
-                    config_path,
-                    init.is_present("force"),
-                    init.value_of("from")
-                        .map(|p| (PathBuf::from(p), base_config_path)),
-                )?,
-                (LIST, Some(list)) => config_list_files(if list.is_present("all") {
-                    &base_config_path
-                } else {
-                    &default_config_path
-                })?,
-                (PATH, _) => config_show_path(config_path, false)?,
-                (SHOW, _) => config_show_contents(config_path)?,
-                _ => {
-                    app_help.print_help().unwrap();
-                }
+                //             match values.subcommand() {
+                //                 (CHECK, _) => config_show_path(config_path, true)?,
+                //                 (EDIT, _) => config_edit_path(config_path)?,
+                //                 (INIT, Some(init)) => config_init_cmd(
+                //                     config_path,
+                //                     init.is_present("force"),
+                //                     init.value_of("from")
+                //                         .map(|p| (PathBuf::from(p), base_config_path)),
+                //                 )?,
+                //                 (LIST, Some(list)) => config_list_files(if list.is_present("all") {
+                //                     &base_config_path
+                //                 } else {
+                //                     &default_config_path
+                //                 })?,
+                //                 (PATH, _) => config_show_path(config_path, false)?,
+                //                 (SHOW, _) => config_show_contents(config_path)?,
+                //                 _ => {
+                //                     app_help.print_help().unwrap();
+                //                 }
+                // >>>>>>> 2b2875f413b01c8adf7a50e530b96a194509a47d
             }
-        }
+        },
         (PORT_FORWARD, Some(values)) => {
             let (mut config_path, _) = get_config_paths()?;
             config_path.push(args.value_of("config").unwrap());
@@ -696,12 +755,14 @@ include both the caller and what system they are calling, i.e.
                 },
             }?;
             let interactive_shell = values.is_present("shell");
+            let use_pgbouncer = values.is_present("pgbouncer");
 
             postgres_cli_cmd(
                 &config,
                 values.value_of("environment"),
                 port,
                 interactive_shell,
+                use_pgbouncer,
             )?
         }
         (KONG_API_KEY, Some(values)) => {

@@ -5,14 +5,6 @@ use std::path::Path;
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
-    // k8s_test: Option<K8sConfig>,
-    // k8s_prod: Option<K8sConfig>,
-
-    // log_test: Option<LogConfig>,
-    // log_prod: Option<LogConfig>,
-
-    // exec_test: Option<ExecConfig>,
-    // exec_prod: Option<ExecConfig>,
     pub port_forward: Option<PortForwardConfig>,
 
     pub postgres_local: Option<PostgresConfig>,
@@ -22,11 +14,12 @@ pub struct Config {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
-pub enum PostgresConfigType {
+pub enum ServerConfigType {
     Kubernetes {
         context: String,
         namespace: String,
         deployment: String,
+        container: Option<String>,
     },
     GCloudProxy {
         instance: String,
@@ -37,11 +30,11 @@ pub enum PostgresConfigType {
 #[derive(Deserialize, Debug)]
 pub struct PostgresConfig {
     #[serde(rename = "type")]
-    pub _type: PostgresConfigType,
+    pub _type: ServerConfigType,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: String,
-    pub password: String,
+    pub password: Option<String>,
     pub database: String,
     pub schema: Option<String>,
 }
