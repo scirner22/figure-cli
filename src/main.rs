@@ -3,7 +3,6 @@ extern crate quick_error;
 #[macro_use]
 extern crate prettytable;
 
-use clap::{value_t, App, Arg, SubCommand};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf, StripPrefixError};
@@ -13,9 +12,11 @@ use std::{env, fs};
 use crate::config::{Config, PortForwardConfig, PostgresConfig, ServerConfigType};
 use crate::runner::run_command;
 use crate::util::ForwardingInfo;
+use clap::{value_t, App, Arg, SubCommand};
 use config::{environment_type, get_config, EnvironmentType};
 use consts::*;
 use prettytable::{format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR, Table};
+use uuid::Uuid;
 use walkdir::WalkDir;
 
 mod config;
@@ -45,6 +46,9 @@ quick_error! {
         WalkdirError(e: walkdir::Error) {
             from()
         }
+        UuidError(e: uuid::Error) {
+            from()
+        }
     }
 }
 
@@ -64,6 +68,73 @@ fn collect_files<P: AsRef<Path>>(path: P, match_suffix: Option<&str>) -> Result<
     }
     paths.sort();
     Ok(paths)
+}
+
+fn generate_kong_api_keys(namespace: &str, name: &str, acl_group: &str, uuid: &Uuid) -> Result<()> {
+    let kong_resources = format!(
+        "---
+apiVersion: configuration.konghq.com/v1
+kind: KongConsumer
+metadata:
+  annotations:
+    konghq.com/plugins: {name}-request-transformer
+    kubernetes.io/ingress.class: kong
+  name: {name}
+  namespace: {namespace}
+username: {name}
+credentials:
+- {name}-kong-keyauth
+- {name}-kong-acl
+---
+apiVersion: configuration.konghq.com/v1
+config:
+  remove:
+    headers:
+    - x-uuid
+    querystring:
+    - apikey
+  add:
+    headers:
+    - x-uuid:{uuid}
+consumerRef: {name}
+kind: KongPlugin
+metadata:
+  name: {name}-request-transformer
+  namespace: {namespace}
+plugin: request-transformer"
+    );
+
+    let acl_group = base64::encode(acl_group);
+    let password = util::random_alphanum(50);
+    let password = base64::encode(&password);
+
+    let secret_resources = format!(
+        "---
+apiVersion: v1
+data:
+  group: {acl_group}
+  kongCredType: YWNs
+kind: Secret
+metadata:
+  name: {name}-kong-acl
+  namespace: {namespace}
+type: Opaque
+---
+apiVersion: v1
+data:
+  key: {password}
+  kongCredType: a2V5LWF1dGg=
+kind: Secret
+metadata:
+  name: {name}-kong-keyauth
+  namespace: {namespace}
+type: Opaque"
+    );
+
+    println!("{}", kong_resources);
+    eprintln!("{}", secret_resources);
+
+    Ok(())
 }
 
 fn k8s_port_forward(
@@ -140,7 +211,7 @@ fn postgres_shell_cmd(config: &PostgresConfig, port: u16) -> Command {
         &config.database,
     ]);
 
-    return cmd;
+    cmd
 }
 
 fn postgres_tunnel_cmd(config: &PostgresConfig, port: u16) -> Result<Option<Command>> {
@@ -183,14 +254,14 @@ fn postgres_pgbouncer_cmd(
     let ini_file_path_str = util::temp_file("ini");
     let mut ini_file = fs::File::create(&ini_file_path_str)?;
 
-    let password = config.password.as_ref().ok_or(FigError::ConfigError(
-        "password required when using pgbouncer".to_owned(),
-    ))?;
+    let password = config.password.as_ref().ok_or_else(|| {
+        FigError::ConfigError("password required when using pgbouncer".to_owned())
+    })?;
 
     // TODO change to md5 hash of password
     // TODO remove
     println!("{}", ini_file_path_str.display());
-    println!("\"{}\" \"{}\"", &config.user, password);
+    println!("\"{}\" \"{}\"", &config.user, &password);
 
     let ini_content = format!(
         include_str!("../template/pgbouncer.toml.template"),
@@ -241,17 +312,18 @@ fn postgres_cli_cmd(
         }
     };
 
-    let postgres_config = match environment_type(env)? {
-        EnvironmentType::Local => config.postgres_local.as_ref().ok_or(FigError::ConfigError(
-            "[postgres_local] block is invalid".to_owned(),
-        ))?,
-        EnvironmentType::Test => config.postgres_test.as_ref().ok_or(FigError::ConfigError(
-            "[postgres_test] block is invalid".to_owned(),
-        ))?,
-        EnvironmentType::Production => config.postgres_prod.as_ref().ok_or(
-            FigError::ConfigError("[postgres_prod] block is invalid".to_owned()),
-        )?,
-    };
+    let postgres_config =
+        match environment_type(env)? {
+            EnvironmentType::Local => config.postgres_local.as_ref().ok_or_else(|| {
+                FigError::ConfigError("[postgres_local] block is invalid".to_owned())
+            })?,
+            EnvironmentType::Test => config.postgres_test.as_ref().ok_or_else(|| {
+                FigError::ConfigError("[postgres_test] block is invalid".to_owned())
+            })?,
+            EnvironmentType::Production => config.postgres_prod.as_ref().ok_or_else(|| {
+                FigError::ConfigError("[postgres_prod] block is invalid".to_owned())
+            })?,
+        };
 
     if interative_shell {
         runner::run_command(
@@ -259,24 +331,22 @@ fn postgres_cli_cmd(
             postgres_tunnel_cmd(postgres_config, port)?.as_mut(),
             false,
         )
+    } else if use_pgbouncer {
+        let bridge_port = util::find_available_port()?;
+        println!(
+            "Using pgbouncer with random open port for bridge {}",
+            bridge_port
+        );
+        runner::run_command(
+            &mut postgres_pgbouncer_cmd(postgres_config, port, bridge_port)?,
+            postgres_tunnel_cmd(postgres_config, bridge_port)?.as_mut(),
+            false,
+        )
     } else {
-        if use_pgbouncer {
-            let bridge_port = util::find_available_port()?;
-            println!(
-                "Using pgbouncer with random open port for bridge {}",
-                bridge_port
-            );
-            runner::run_command(
-                &mut postgres_pgbouncer_cmd(postgres_config, port, bridge_port)?,
-                postgres_tunnel_cmd(postgres_config, bridge_port)?.as_mut(),
-                false,
-            )
-        } else {
-            println!("Using default port forwarding");
-            let mut forward_command = postgres_tunnel_cmd(postgres_config, port)?
-                .expect("couldn't build port-forward command");
-            runner::run_command(&mut forward_command, None, false)
-        }
+        println!("Using default port forwarding");
+        let mut forward_command = postgres_tunnel_cmd(postgres_config, port)?
+            .expect("couldn't build port-forward command");
+        runner::run_command(&mut forward_command, None, false)
     }
 }
 
@@ -369,7 +439,7 @@ fn config_show_path<P: AsRef<Path>>(path: P, check: bool) -> Result<()> {
 fn config_edit_path<P: AsRef<Path>>(path: P) -> Result<()> {
     let file_path = path.as_ref().to_str().unwrap();
     // use whatever the system envvar "EDITOR" is set to:
-    let system_editor = env::var("EDITOR").unwrap_or(DEFAULT_EDITOR.to_owned());
+    let system_editor = env::var("EDITOR").unwrap_or_else(|_| DEFAULT_EDITOR.to_owned());
     let mut editor_cmd = Command::new(system_editor);
     editor_cmd.arg(file_path);
     runner::run_command(&mut editor_cmd, None, false)?;
@@ -381,6 +451,23 @@ fn config_list_files<P: AsRef<Path>>(path: P) -> Result<()> {
         println!("{}", p.strip_prefix(&path)?.display());
     }
     Ok(())
+}
+
+fn get_config_paths() -> Result<(PathBuf, PathBuf)> {
+    let mut default_config_path = dirs::config_dir().unwrap();
+    default_config_path.push(FIG_CONFIG_DIR);
+    let base_config_path = default_config_path.clone();
+
+    if !std::path::Path::new(&default_config_path).exists() {
+        std::fs::create_dir(&default_config_path)?;
+    }
+
+    default_config_path.push(std::env::current_dir()?.file_name().unwrap());
+    if !std::path::Path::new(&default_config_path).exists() {
+        std::fs::create_dir(&default_config_path)?;
+    }
+
+    Ok((default_config_path, base_config_path))
 }
 
 fn main() -> Result<()> {
@@ -400,7 +487,7 @@ fn main() -> Result<()> {
 
         (default_config_path, base_config_path)
     };
-
+    let rand_uuid = Uuid::new_v4().hyphenated().to_string();
     let static_port_arg = Arg::with_name("port")
         .short("p")
         .long("port")
@@ -518,6 +605,45 @@ fn main() -> Result<()> {
             .arg(&interactive_shell_arg)
             .arg(&pgbouncer_arg)
             .about("Proxies a remote postgres connection")
+        )
+        .subcommand(SubCommand::with_name(KONG_API_KEY)
+            .arg(&Arg::with_name("name")
+                 .required(true)
+                 .value_name("NAME")
+                 .long("name")
+                 .short("p")
+                 .takes_value(true)
+                 .help("The string used for naming resources.")
+                 .long_help(r#"The string used for naming resources. This naming convention is to
+include both the caller and what system they are calling, i.e.
+"third-party-to-service-identity"."#)
+            )
+            .arg(&Arg::with_name("namespace")
+                 .required(true)
+                 .value_name("NAMESPACE")
+                 .long("namespace")
+                 .short("n")
+                 .takes_value(true)
+                 .help("The kubernetes namespace to use.")
+            )
+            .arg(&Arg::with_name("acl-group")
+                 .required(true)
+                 .value_name("ACL")
+                 .long("acl-group")
+                 .short("a")
+                 .takes_value(true)
+                 .help("The acl group name to use.")
+            )
+            .arg(&Arg::with_name("uuid")
+                 .required(false)
+                 .value_name("UUID")
+                 .long("uuid")
+                 .short("u")
+                 .takes_value(true)
+                 .default_value(&rand_uuid)
+                 .help("Uuid to use during header exchange. Defaults to a random UUID")
+            )
+            .about("Creates a new kong api key")
         );
 
     let mut app_help = app.clone();
@@ -542,6 +668,7 @@ fn main() -> Result<()> {
                 ));
             }
         }
+        // <<<<<<< HEAD
         (CONFIG, Some(values)) => match values.subcommand() {
             (CHECK, _) => config_show_path(config_path, true)?,
             (EDIT, _) => config_edit_path(config_path)?,
@@ -560,15 +687,45 @@ fn main() -> Result<()> {
             (SHOW, _) => config_show_contents(config_path)?,
             _ => {
                 app_help.print_help().unwrap();
+                // =======
+                //         (CONFIG, Some(values)) => {
+                //             let (mut config_path, base_config_path) = get_config_paths()?;
+                //             let default_config_path = config_path.clone();
+                //             config_path.push(args.value_of("config").unwrap());
+                //             config_path.set_extension("toml");
+
+                //             match values.subcommand() {
+                //                 (CHECK, _) => config_show_path(config_path, true)?,
+                //                 (EDIT, _) => config_edit_path(config_path)?,
+                //                 (INIT, Some(init)) => config_init_cmd(
+                //                     config_path,
+                //                     init.is_present("force"),
+                //                     init.value_of("from")
+                //                         .map(|p| (PathBuf::from(p), base_config_path)),
+                //                 )?,
+                //                 (LIST, Some(list)) => config_list_files(if list.is_present("all") {
+                //                     &base_config_path
+                //                 } else {
+                //                     &default_config_path
+                //                 })?,
+                //                 (PATH, _) => config_show_path(config_path, false)?,
+                //                 (SHOW, _) => config_show_contents(config_path)?,
+                //                 _ => {
+                //                     app_help.print_help().unwrap();
+                //                 }
+                // >>>>>>> 2b2875f413b01c8adf7a50e530b96a194509a47d
             }
         },
         (PORT_FORWARD, Some(values)) => {
+            let (mut config_path, _) = get_config_paths()?;
+            config_path.push(args.value_of("config").unwrap());
+            config_path.set_extension("toml");
+
             let config = get_config(config_path)?;
-            let forwarding = util::parse_forwarding_string(
-                &(values.value_of("forward").ok_or(FigError::ParseError(
-                    "Could not parse remote string".to_owned(),
-                ))?),
-            )?;
+            let forward_value = values
+                .value_of("forward")
+                .ok_or_else(|| FigError::ParseError("Could not parse remote string".to_owned()))?;
+            let forwarding = util::parse_forwarding_string(forward_value)?;
             let context = values.value_of("context");
             let namespace = values.value_of("namespace");
 
@@ -580,6 +737,10 @@ fn main() -> Result<()> {
             )?
         }
         (POSTGRES_CLI, Some(values)) => {
+            let (mut config_path, _) = get_config_paths()?;
+            config_path.push(args.value_of("config").unwrap());
+            config_path.set_extension("toml");
+
             // TODO on this error make sure printed messages shows you how to create a config file
             let config = get_config(config_path)?;
             let port = match value_t!(values.value_of("port"), u16) {
@@ -603,6 +764,14 @@ fn main() -> Result<()> {
                 interactive_shell,
                 use_pgbouncer,
             )?
+        }
+        (KONG_API_KEY, Some(values)) => {
+            let uuid = Uuid::try_parse(values.value_of("uuid").unwrap())?;
+            let name = values.value_of("name").unwrap();
+            let namespace = values.value_of("namespace").unwrap();
+            let acl_group = values.value_of("acl-group").unwrap();
+
+            generate_kong_api_keys(namespace, name, acl_group, &uuid)?;
         }
         _ => {
             // print help by default:

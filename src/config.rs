@@ -41,7 +41,7 @@ pub struct PostgresConfig {
 
 impl PostgresConfig {
     pub fn host(&self) -> String {
-        self.host.clone().unwrap_or("localhost".to_owned())
+        self.host.clone().unwrap_or_else(|| "localhost".to_owned())
     }
 
     pub fn port(&self) -> u16 {
@@ -49,7 +49,7 @@ impl PostgresConfig {
     }
 
     pub fn schema(&self) -> String {
-        self.schema.clone().unwrap_or("public".to_owned())
+        self.schema.clone().unwrap_or_else(|| "public".to_owned())
     }
 }
 

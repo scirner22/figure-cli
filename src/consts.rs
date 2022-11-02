@@ -3,6 +3,7 @@ pub const CONFIG: &str = "config";
 pub const DOCTOR: &str = "doctor";
 pub const EDIT: &str = "edit";
 pub const INIT: &str = "init";
+pub const KONG_API_KEY: &str = "kong-api-key";
 pub const LIST: &str = "list";
 pub const PATH: &str = "path";
 pub const PORT_FORWARD: &str = "port-forward";
