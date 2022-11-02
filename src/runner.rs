@@ -11,15 +11,16 @@ pub fn run_command(
 ) -> crate::Result<()> {
     let parent = if let Some(cmd) = parent_command {
         let proc = if suppress_std {
-            cmd.stderr(Stdio::null())
-                .stdout(Stdio::null())
+            cmd.stderr(Stdio::null()).stdout(Stdio::null())
         } else {
             cmd
         };
         let proc = proc.spawn()?;
 
         // TODO instead of static delay read stdout for matching regex?
-        println!("Sleeping 5 seconds to give parent process time to startup. This needs to be fixed!");
+        println!(
+            "Sleeping 5 seconds to give parent process time to startup. This needs to be fixed!"
+        );
         thread::sleep(Duration::from_millis(5_000));
 
         Some(proc)
@@ -28,10 +29,9 @@ pub fn run_command(
     };
 
     let command_proc = if suppress_std {
-        command.stderr(Stdio::null())
-            .stdout(Stdio::null())
+        command.stderr(Stdio::null()).stdout(Stdio::null())
     } else {
-       command
+        command
     };
     let mut command_proc = command_proc.spawn()?;
 
@@ -52,10 +52,12 @@ pub fn run_command(
                 return if status.success() {
                     Ok(())
                 } else {
-                    Err(FigError::ExecError("child exited unsuccessfully".to_owned()))
-                }
+                    Err(FigError::ExecError(
+                        "child exited unsuccessfully".to_owned(),
+                    ))
+                };
             }
-            _ => thread::sleep(Duration::from_millis(200))
+            _ => thread::sleep(Duration::from_millis(200)),
         }
     }
 }
