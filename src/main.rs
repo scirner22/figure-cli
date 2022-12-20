@@ -721,7 +721,7 @@ include both the caller and what system they are calling, i.e.
             config_path.push(args.value_of("config").unwrap());
             config_path.set_extension("toml");
 
-            let config = get_config(config_path)?;
+            let port_forward_config = get_config(config_path).ok().and_then(|c| c.port_forward);
             let forward_value = values
                 .value_of("forward")
                 .ok_or_else(|| FigError::ParseError("Could not parse remote string".to_owned()))?;
@@ -730,7 +730,7 @@ include both the caller and what system they are calling, i.e.
             let namespace = values.value_of("namespace");
 
             k8s_port_forward(
-                config.port_forward.as_ref(),
+                port_forward_config.as_ref(),
                 &forwarding,
                 context,
                 namespace,
