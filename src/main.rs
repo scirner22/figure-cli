@@ -238,7 +238,7 @@ fn postgres_tunnel_cmd(config: &PostgresConfig, port: u16) -> Result<Option<Comm
         }
         ServerConfigType::GCloudProxy { instance } => {
             let mut cmd = Command::new("cloud_sql_proxy");
-            cmd.args(vec!["-instances", &format!("{}=tcp:{}", instance, port)]);
+            cmd.args(vec!["-instances", &format!("{}=tcp:{}", instance, port), "-enable_iam_login"]);
 
             Ok(Some(cmd))
         }
